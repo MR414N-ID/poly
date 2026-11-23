@@ -23,7 +23,7 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 POLYMARKET_WALLET_KEY = os.getenv("POLYMARKET_WALLET_KEY", "")
@@ -33,7 +33,7 @@ POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 HOURS_TO_CLOSE = 6
 FALLBACK_1_HOURS = 12
 FALLBACK_2_HOURS = 20
-TOP_MARKETS = 10
+TOP_MARKETS = 100
 
 # ── Keywords untuk deteksi market sports ──────────────────────
 SPORTS_KEYWORDS = [
@@ -54,7 +54,7 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE = 70
 MAX_BET_PER_MARKET = 1.0
 EXIT_UPPER = 0.99
-SCAN_INTERVAL_MENIT = 15
+SCAN_INTERVAL_MENIT = 2
 AUTO_BUY_ENABLED = True
 DRY_RUN = True  # default DEMO
 
@@ -446,7 +446,7 @@ def _get_clob_client():
 
 
 def _iso_z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_sports_market(question: str) -> bool:
@@ -464,7 +464,8 @@ async def _fetch_markets_in_window(hours: float, sports_only: bool = False) -> l
         "end_date_min": _iso_z(now),
         "end_date_max": _iso_z(now + timedelta(hours=hours)),
         "limit": limit,
-        "order": "volume_24hr", "ascending": "false",
+        "_sort": "volume24hr",
+        "_order": "desc",
     }
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{GAMMA_API}/markets", params=params)
