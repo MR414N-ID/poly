@@ -23,7 +23,7 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 POLYMARKET_WALLET_KEY = os.getenv("POLYMARKET_WALLET_KEY", "")
