@@ -34,7 +34,17 @@ HOURS_TO_CLOSE = 6
 FALLBACK_1_HOURS = 12
 FALLBACK_2_HOURS = 20
 TOP_MARKETS = 10
-SPORTS_TAG_SLUG = "sports"
+
+# ── Keywords untuk deteksi market sports ──────────────────────
+SPORTS_KEYWORDS = [
+    "win", "beat", "defeat", "match", "game", "final", "championship",
+    "league", "cup", "tournament", "nfl", "nba", "nhl", "mlb", "mls",
+    "soccer", "football", "basketball", "baseball", "hockey", "tennis",
+    "ufc", "mma", "boxing", "golf", "f1", "formula", "race", "grand prix",
+    "premier league", "la liga", "serie a", "bundesliga", "champions league",
+    "world cup", "playoffs", "superbowl", "super bowl", "nascar",
+    "score", "goal", "point", "quarter", "half", "overtime",
+]
 
 # ── Filter harga (entry) ───────────────────────────────────────
 MIN_ODDS = 0.40
@@ -372,6 +382,17 @@ async def build_pnl_text() -> str:
 
 async def telegram_poll_loop():
     """Long-polling untuk baca klik tombol & command."""
+    # FIX 409: Drop semua update lama dulu sebelum mulai polling
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            await c.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
+                params={"offset": -1, "timeout": 0}
+            )
+        logger.info("✅ Drop pending updates selesai")
+    except Exception as e:
+        logger.warning(f"Drop updates error: {e}")
+
     offset = 0
     while True:
         try:
@@ -385,6 +406,13 @@ async def telegram_poll_loop():
                             "allowed_updates": json.dumps(["callback_query", "message"])},
                 )
                 data = r.json()
+
+            # Handle 409 Conflict — tunggu sebentar lalu retry
+            if not data.get("ok") and data.get("error_code") == 409:
+                logger.warning("409 Conflict: ada instance lain, tunggu 10 detik...")
+                await asyncio.sleep(10)
+                continue
+
             for upd in data.get("result", []):
                 offset = upd["update_id"] + 1
                 if "callback_query" in upd:
@@ -421,21 +449,33 @@ def _iso_z(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _is_sports_market(question: str) -> bool:
+    """Filter manual market sports berdasarkan keyword di question."""
+    q = question.lower()
+    return any(kw in q for kw in SPORTS_KEYWORDS)
+
+
 async def _fetch_markets_in_window(hours: float, sports_only: bool = False) -> list[dict]:
     now = datetime.now(timezone.utc)
+    # Ambil lebih banyak kalau sports_only supaya setelah filter keyword masih cukup
+    limit = min(TOP_MARKETS * 10, 200) if sports_only else min(TOP_MARKETS * 3, 100)
     params = {
         "active": "true", "closed": "false",
         "end_date_min": _iso_z(now),
         "end_date_max": _iso_z(now + timedelta(hours=hours)),
-        "limit": min(TOP_MARKETS * 3, 100),
+        "limit": limit,
         "order": "volume_24hr", "ascending": "false",
     }
-    if sports_only:
-        params["tag_slug"] = SPORTS_TAG_SLUG
     async with httpx.AsyncClient(timeout=20) as c:
         r = await c.get(f"{GAMMA_API}/markets", params=params)
         r.raise_for_status()
-        return r.json()
+        markets = r.json()
+
+    if sports_only:
+        markets = [m for m in markets if _is_sports_market(m.get("question", ""))]
+        logger.info(f"Filter sports keyword: {len(markets)} market lolos")
+
+    return markets
 
 
 def _parse_market(m: dict) -> dict | None:
@@ -480,6 +520,7 @@ async def get_top_markets() -> tuple[list[dict], str]:
                 logger.info(f"✅ {len(result)} market ({label})")
                 return result, label
 
+        # Fallback: semua kategori tanpa filter sports
         markets = await _fetch_markets_in_window(FALLBACK_2_HOURS, sports_only=False)
         result = [p for p in (_parse_market(m) for m in markets) if p][:TOP_MARKETS]
         if result:
@@ -598,7 +639,6 @@ def redeem_position(market_id: str, condition_id: str) -> dict:
         return {"success": True, "dry_run": True,
                 "note": "DEMO: claim disimulasikan"}
     try:
-        # py-clob-client redeem (jika tersedia)
         client = _get_clob_client()
         if hasattr(client, "redeem"):
             resp = client.redeem(condition_id=condition_id)
