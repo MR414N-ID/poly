@@ -58,7 +58,7 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 70
 MAX_BET_PER_MARKET  = 2.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 15
+SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
@@ -664,27 +664,15 @@ async def telegram_poll_loop():
 #  POLYMARKET CLIENT — Magic.link (signature_type=1, gasless)
 # ═══════════════════════════════════════════════════════════════
 
-def _get_clob_client():
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    client = ClobClient(
-        host=CLOB_API,
-        key=POLYMARKET_WALLET_KEY,
-        chain_id=POLYGON,
-        signature_type=1,          # Magic.link
-        funder=POLYMARKET_FUNDER_ADDRESS or None,
-    )
-    client.set_api_creds(client.create_or_derive_api_creds())
-    return client
-
-
 async def validate_wallet() -> tuple[bool, str]:
-    """Validasi koneksi wallet saat startup REAL."""
+    """Validasi wallet saat startup REAL."""
     if not POLYMARKET_WALLET_KEY or not POLYMARKET_FUNDER_ADDRESS:
         return False, "POLYMARKET_WALLET_KEY atau FUNDER_ADDRESS kosong"
     try:
         bal = get_usdc_balance()
-        return True, f"Saldo USDC: ${bal:.2f}"
+        if bal >= 0:
+            return True, f"Saldo USDC: ${bal:.2f}"
+        return False, "Gagal ambil saldo"
     except Exception as e:
         return False, str(e)
 
@@ -792,91 +780,141 @@ async def get_market_status(market_id: str) -> dict | None:
 # ── Helper wallet ──────────────────────────────────────────────
 
 def get_usdc_balance() -> float:
+    """Ambil saldo USDC via Polygon RPC langsung, tanpa py_clob_client."""
     try:
-        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
-        client = _get_clob_client()
-        resp   = client.get_balance_allowance(
-            params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
-        return float(resp.get("balance", 0)) / 1e6
+        # pUSD contract Polymarket di Polygon
+        USDC_CONTRACT = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
+        # balanceOf(address) = keccak256 4 bytes = 0x70a08231
+        padded = POLYMARKET_FUNDER_ADDRESS.lower().replace("0x", "").zfill(64)
+        data   = "0x70a08231" + padded
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_call",
+            "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+        }
+        import httpx as _h
+        # Coba beberapa RPC sampai berhasil
+        rpc_list = [
+            "https://rpc.ankr.com/polygon",
+            "https://polygon-bor-rpc.publicnode.com",
+            "https://1rpc.io/matic",
+        ]
+        r = None
+        for rpc in rpc_list:
+            try:
+                r = _h.post(rpc, json=payload, timeout=10)
+                if r.json().get("result"):
+                    break
+            except Exception:
+                continue
+        raw = r.json().get("result", "0x0")
+        bal = int(raw, 16) / 1e6  # USDC 6 desimal
+        return round(bal, 4)
     except Exception as e:
         logger.error(f"Balance error: {e}")
         return 0.0
 
 
 def get_best_bid(token_id: str) -> float | None:
+    """Ambil harga bid via CLOB API langsung."""
     try:
-        client = _get_clob_client()
-        p = client.get_price(token_id, side="SELL")
-        return float(p.get("price", 0)) if isinstance(p, dict) else float(p)
+        import httpx as _h
+        r = _h.get(f"{CLOB_API}/price",
+                   params={"token_id": token_id, "side": "SELL"}, timeout=10)
+        data = r.json()
+        return float(data.get("price", 0))
     except Exception as e:
         logger.error(f"get_best_bid error: {e}")
         return None
 
 
 def get_best_ask(token_id: str) -> float | None:
+    """Ambil harga ask via CLOB API langsung."""
     try:
-        client = _get_clob_client()
-        p = client.get_price(token_id, side="BUY")
-        return float(p.get("price", 0)) if isinstance(p, dict) else float(p)
+        import httpx as _h
+        r = _h.get(f"{CLOB_API}/price",
+                   params={"token_id": token_id, "side": "BUY"}, timeout=10)
+        data = r.json()
+        return float(data.get("price", 0))
     except Exception as e:
         logger.error(f"get_best_ask error: {e}")
         return None
+
+
+def _sign_and_post_order(token_id: str, amount: float, side: str) -> dict:
+    """Sign dan post order ke CLOB API pakai eth_account langsung."""
+    try:
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        import time, hashlib
+
+        # Build order sederhana
+        nonce     = int(time.time() * 1000)
+        order_str = f"{token_id}:{amount}:{side}:{nonce}"
+        msg       = encode_defunct(text=order_str)
+        signed    = Account.sign_message(msg, private_key=POLYMARKET_WALLET_KEY)
+        sig       = signed.signature.hex()
+
+        import httpx as _h
+        resp = _h.post(f"{CLOB_API}/order", json={
+            "token_id":  token_id,
+            "amount":    amount,
+            "side":      side,
+            "type":      "FOK",
+            "signature": sig,
+            "nonce":     nonce,
+            "funder":    POLYMARKET_FUNDER_ADDRESS,
+        }, timeout=15)
+        data = resp.json()
+        if data.get("errorMsg"):
+            return {"success": False, "error": data["errorMsg"]}
+        return {"success": True, "order": data,
+                "tx_hash": data.get("transactionHash", "")}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
-    try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
-        amount_usd = round(amount_usd, 2)
-        if amount_usd < 1.0:
-            return {"success": False, "error": "Minimal $1 USDC per order"}
-        client = _get_clob_client()
-        signed = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY))
-        resp = client.post_order(signed, orderType=OrderType.FOK)
-        if resp.get("errorMsg"):
-            return {"success": False, "error": resp["errorMsg"]}
-        # Ambil tx hash untuk Polygonscan
-        tx_hash = resp.get("transactionHash", "")
-        return {"success": True, "order": resp, "tx_hash": tx_hash}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    amount_usd = round(amount_usd, 2)
+    if amount_usd < 1.0:
+        return {"success": False, "error": "Minimal $1 USDC per order"}
+    return _sign_and_post_order(token_id, amount_usd, "BUY")
 
 
 def sell_outcome(token_id: str, shares: float) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
-    try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import SELL
-        if shares < 1.0:
-            return {"success": False, "error": "Share terlalu kecil (< 1)"}
-        client = _get_clob_client()
-        signed = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL))
-        resp = client.post_order(signed, orderType=OrderType.FOK)
-        if resp.get("errorMsg"):
-            return {"success": False, "error": resp["errorMsg"]}
-        tx_hash = resp.get("transactionHash", "")
-        return {"success": True, "order": resp, "tx_hash": tx_hash}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
+    if shares < 1.0:
+        return {"success": False, "error": "Share terlalu kecil (< 1)"}
+    return _sign_and_post_order(token_id, round(shares, 4), "SELL")
 
 
 def redeem_position(market_id: str, condition_id: str) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True, "note": "DEMO: claim disimulasikan"}
     try:
-        client = _get_clob_client()
-        if hasattr(client, "redeem"):
-            resp    = client.redeem(condition_id=condition_id)
-            tx_hash = resp.get("transactionHash", "") if isinstance(resp, dict) else ""
-            return {"success": True, "resp": resp, "tx_hash": tx_hash}
-        return {"success": False, "error": "client.redeem tidak tersedia"}
+        import httpx as _h
+        from eth_account import Account
+        from eth_account.messages import encode_defunct
+        import time
+        nonce  = int(time.time() * 1000)
+        msg    = encode_defunct(text=f"redeem:{condition_id}:{nonce}")
+        signed = Account.sign_message(msg, private_key=POLYMARKET_WALLET_KEY)
+        resp   = _h.post(f"{CLOB_API}/redeem", json={
+            "condition_id": condition_id,
+            "signature":    signed.signature.hex(),
+            "nonce":        nonce,
+            "funder":       POLYMARKET_FUNDER_ADDRESS,
+        }, timeout=15)
+        data = resp.json()
+        if data.get("errorMsg"):
+            return {"success": False, "error": data["errorMsg"]}
+        return {"success": True, "resp": data,
+                "tx_hash": data.get("transactionHash", "")}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
