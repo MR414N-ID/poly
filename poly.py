@@ -25,7 +25,7 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL         = "openai/gpt-oss-120b"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
@@ -58,12 +58,12 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 70
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 5
+SCAN_INTERVAL_MENIT = 15
 AUTO_BUY_ENABLED    = True
 DRY_RUN             = True
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS   = 5
+MAX_OPEN_POSITIONS   = 2
 ENABLE_SELL          = True
 DAILY_LOSS_LIMIT_USD = 2.0
 
@@ -151,6 +151,33 @@ def save_positions(data: dict):
 
 def already_held(market_id: str) -> bool:
     return market_id in load_positions()
+
+
+def _extract_team_keys(question: str) -> list[str]:
+    """Ekstrak kata kunci tim dari question (3+ karakter, bukan kata umum)."""
+    SKIP_WORDS = {
+        "the", "vs", "vs.", "at", "in", "on", "by", "to", "of", "a", "an",
+        "and", "or", "for", "with", "draw", "win", "both", "teams", "score",
+        "halftime", "half", "first", "second", "spread", "leading", "will",
+        "1h", "2h", "ld", "ft", "ml", "over", "under", "point", "points",
+    }
+    words = question.lower().replace("?", "").replace(":", "").replace("-", " ").split()
+    return [w for w in words if len(w) >= 3 and w not in SKIP_WORDS]
+
+
+def team_already_held(question: str) -> bool:
+    """Cek apakah ada kata kunci tim dari question yang sudah ada di posisi terbuka."""
+    positions  = load_positions()
+    new_keys   = set(_extract_team_keys(question))
+    if not new_keys:
+        return False
+    for pos in positions.values():
+        existing_keys = set(_extract_team_keys(pos.get("question", "")))
+        # Kalau ada 2+ kata yang sama → anggap tim yang sama
+        if len(new_keys & existing_keys) >= 2:
+            logger.info(f"Skip duplikat tim: '{question[:60]}'")
+            return True
+    return False
 
 
 def record_buy(market: dict, outcome: str, token_id: str, amount: float, fill_price: float):
@@ -1005,6 +1032,8 @@ async def run_cycle():
     demo = is_demo()
     for m in markets:
         if already_held(m["id"]):
+            continue
+        if team_already_held(m["question"]):
             continue
         if not can_open_new_position():
             break
