@@ -58,12 +58,12 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 70
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 15
+SCAN_INTERVAL_MENIT = 5
 AUTO_BUY_ENABLED    = True
 DRY_RUN             = True
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS   = 2
+MAX_OPEN_POSITIONS   = 5
 ENABLE_SELL          = True
 DAILY_LOSS_LIMIT_USD = 2.0
 
