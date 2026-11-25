@@ -27,7 +27,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID          = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
 GROQ_API_KEY              = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL                = "openai/gpt-oss-120b"
+GROQ_MODEL                = "llama-3.1-8b-instant"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 
