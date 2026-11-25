@@ -66,7 +66,7 @@ SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS     = 2
+MAX_OPEN_POSITIONS     = 5
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 4
 ALERT_BALANCE_DROP_PCT = 20
@@ -314,17 +314,20 @@ async def tg_send(text: str, keyboard: list = None) -> bool:
 
 
 async def tg_send_photo(caption: str, keyboard: list = None) -> bool:
-    """Kirim foto robot trading dengan caption."""
+    """Kirim foto robot trading dengan caption dan keyboard."""
     payload = {
-        "chat_id":   TELEGRAM_CHAT_ID,
-        "photo":     BOT_IMAGE_URL,
-        "caption":   caption,
+        "chat_id":    TELEGRAM_CHAT_ID,
+        "photo":      BOT_IMAGE_URL,
+        "caption":    caption,
         "parse_mode": "HTML",
     }
     if keyboard:
-        payload["reply_markup"] = {"inline_keyboard": keyboard}
+        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     r = await tg_api("sendPhoto", payload)
-    return bool(r.get("ok"))
+    # Kalau foto gagal, fallback ke teks biasa
+    if not r.get("ok"):
+        return await tg_send(caption, keyboard)
+    return True
 
 
 async def tg_edit(message_id: int, text: str, keyboard: list = None):
@@ -877,12 +880,66 @@ def get_best_ask(token_id: str) -> float | None:
         return None
 
 
+def _post_order_direct(signed_order, order_type: str = "FOK") -> dict:
+    """Kirim order langsung via HTTP bypass post_order yang bermasalah."""
+    try:
+        import httpx as _h
+        o      = signed_order.order
+        vals   = o.values
+        # Build payload sesuai format Polymarket terbaru
+        payload = {
+            "order": {
+                "salt":          str(vals["salt"]),
+                "maker":         vals["maker"],
+                "signer":        vals["signer"],
+                "taker":         vals["taker"],
+                "tokenId":       str(vals["tokenId"]),
+                "makerAmount":   str(vals["makerAmount"]),
+                "takerAmount":   str(vals["takerAmount"]),
+                "expiration":    str(vals["expiration"]),
+                "nonce":         str(vals["nonce"]),
+                "feeRateBps":    str(vals["feeRateBps"]),
+                "side":          str(vals["side"]),
+                "signatureType": str(vals["signatureType"]),
+            },
+            "signature":  signed_order.signature,
+            "orderType":  order_type,
+        }
+        # Ambil API credentials
+        import time, hmac, hashlib, base64
+        client = _get_clob_client()
+        creds  = client.create_or_derive_api_creds()
+        ts     = str(int(time.time()))
+        msg    = ts + "POST" + "/order" + json.dumps(payload, separators=(',', ':'))
+        sig    = base64.b64encode(
+            hmac.new(creds.api_secret.encode(), msg.encode(), hashlib.sha256).digest()
+        ).decode()
+        headers = {
+            "Content-Type":   "application/json",
+            "POLY_ADDRESS":   POLYMARKET_FUNDER_ADDRESS,
+            "POLY_SIGNATURE": sig,
+            "POLY_TIMESTAMP": ts,
+            "POLY_API_KEY":   creds.api_key,
+            "POLY_PASSPHRASE": creds.api_passphrase,
+        }
+        r = _h.post(f"{CLOB_API}/order", json=payload, headers=headers, timeout=15)
+        data = r.json()
+        logger.info(f"📋 Order response ({r.status_code}): {data}")
+        if r.status_code != 200 or data.get("errorMsg"):
+            return {"success": False, "error": data.get("errorMsg") or str(data)}
+        return {"success": True, "order": data,
+                "tx_hash": data.get("transactionHash", "")}
+    except Exception as e:
+        logger.error(f"❌ _post_order_direct error: {e}")
+        return {"success": False, "error": str(e)}
+
+
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs
         from py_clob_client.order_builder.constants import BUY
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
@@ -890,12 +947,7 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
         signed     = client.create_market_order(order_args)
-        resp       = client.post_order(signed, OrderType.FOK)
-        logger.info(f"📋 Order response: {resp}")
-        if isinstance(resp, dict) and resp.get("errorMsg"):
-            return {"success": False, "error": resp["errorMsg"]}
-        return {"success": True, "order": resp,
-                "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
+        return _post_order_direct(signed, "FOK")
     except Exception as e:
         logger.error(f"❌ buy_outcome error: {e}")
         return {"success": False, "error": str(e)}
@@ -906,19 +958,14 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs
         from py_clob_client.order_builder.constants import SELL
         if shares < 1.0:
             return {"success": False, "error": "Share terlalu kecil"}
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
         signed     = client.create_market_order(order_args)
-        resp       = client.post_order(signed, OrderType.FOK)
-        logger.info(f"📋 Sell response: {resp}")
-        if isinstance(resp, dict) and resp.get("errorMsg"):
-            return {"success": False, "error": resp["errorMsg"]}
-        return {"success": True, "order": resp,
-                "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
+        return _post_order_direct(signed, "FOK")
     except Exception as e:
         logger.error(f"❌ sell_outcome error: {e}")
         return {"success": False, "error": str(e)}
@@ -1269,26 +1316,19 @@ async def main():
     if not GROQ_API_KEY or GROQ_API_KEY.startswith("ISI_"):
         raise RuntimeError("GROQ_API_KEY belum diisi")
 
-    # Reset active state saat startup — harus klik MULAI dulu
+    # Reset active + mode saat startup — harus pilih mode dan klik MULAI dulu
     state = load_state()
-    if state.get("active"):
-        state["active"] = False
-        save_state(state)
-        logger.info("🔄 State direset — klik MULAI TES untuk mulai")
+    state["active"] = False
+    state["mode"]   = None
+    save_state(state)
+    logger.info("🔄 State direset — pilih mode dulu")
 
     asyncio.create_task(telegram_poll_loop())
 
-    if not state.get("mode"):
-        await tg_send_photo(
-            "🤖 <b>BOT POLYMARKET</b>\n\nPilih mode dana:",
-            kb_mode_select()
-        )
-    else:
-        await tg_send_photo(
-            f"🤖 Bot siap. Mode: <b>{state['mode']}</b>\n"
-            f"Klik ▶️ MULAI TES untuk mulai scan.",
-            kb_main()
-        )
+    await tg_send_photo(
+        "🤖 <b>BOT POLYMARKET</b>\n\nPilih mode dana:",
+        kb_mode_select()
+    )
 
     while True:
         try:
