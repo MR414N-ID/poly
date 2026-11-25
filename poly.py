@@ -56,9 +56,9 @@ MAX_ODDS = 0.60
 
 # ── Setting trading ────────────────────────────────────────────
 MIN_CONFIDENCE      = 70
-MAX_BET_PER_MARKET  = 2.0
+MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 5
+SCAN_INTERVAL_MENIT = 15
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
@@ -968,7 +968,7 @@ Jawab HANYA JSON valid:
   "signal": "BUY_YES" atau "BUY_NO" atau "SKIP",
   "confidence": angka 0-100,
   "recommended_outcome": "YES" atau "NO" atau "SKIP",
-  "reasoning": "penjelasan singkat max 2 kalimat bahasa Indonesia"
+  "reasoning": "max 10 kata bahasa Indonesia"
 }}"""
     try:
         async with httpx.AsyncClient(timeout=30) as c:
@@ -977,7 +977,7 @@ Jawab HANYA JSON valid:
                                       "Content-Type": "application/json"},
                              json={"model": GROQ_MODEL,
                                    "messages": [{"role": "user", "content": prompt}],
-                                   "temperature": 0.2, "max_tokens": 500})
+                                   "temperature": 0.2, "max_tokens": 150})
             r.raise_for_status()
             raw_content = r.json()["choices"][0]["message"]["content"].strip()
             # Coba extract JSON dari response meski ada teks tambahan
