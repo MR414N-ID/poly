@@ -27,7 +27,7 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID          = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
 GROQ_API_KEY              = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL                = "llama-3.1-8b-instant"
+GROQ_MODEL                = "qwen/qwen3.8-27b"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 
@@ -56,9 +56,9 @@ MAX_ODDS = 0.60
 
 # ── Setting trading ────────────────────────────────────────────
 MIN_CONFIDENCE      = 70
-MAX_BET_PER_MARKET  = 2.0
+MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 5
+SCAN_INTERVAL_MENIT = 15
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
