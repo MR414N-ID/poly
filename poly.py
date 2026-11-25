@@ -66,7 +66,7 @@ SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS     = 5
+MAX_OPEN_POSITIONS     = 2
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 4
 ALERT_BALANCE_DROP_PCT = 20
@@ -882,7 +882,7 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
@@ -890,7 +890,7 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
         signed     = client.create_market_order(order_args)
-        resp       = client.post_order(signed)
+        resp       = client.post_order(signed, OrderType.FOK)
         logger.info(f"📋 Order response: {resp}")
         if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
@@ -906,14 +906,14 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import SELL
         if shares < 1.0:
             return {"success": False, "error": "Share terlalu kecil"}
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
         signed     = client.create_market_order(order_args)
-        resp       = client.post_order(signed)
+        resp       = client.post_order(signed, OrderType.FOK)
         logger.info(f"📋 Sell response: {resp}")
         if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
