@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import os
+import re
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 
@@ -25,11 +26,14 @@ load_dotenv()
 # ═══════════════════════════════════════════════════════════════
 
 TELEGRAM_BOT_TOKEN        = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID          = os.getenv("TELEGRAM_CHAT_ID", "1311484460")
+TELEGRAM_CHAT_ID          = "1311484460"
 GROQ_API_KEY              = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL                = "qwen/qwen3.8-27b"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
+
+# ── Gambar robot trading ───────────────────────────────────────
+BOT_IMAGE_URL = "https://i.ibb.co/KpS4ZD3R/file-0000000096888211b59a5bc34420ef0c.png"
 
 # ── Filter market (window jam) ─────────────────────────────────
 LIVE_HOURS       = 2
@@ -55,17 +59,17 @@ MIN_ODDS = 0.40
 MAX_ODDS = 0.60
 
 # ── Setting trading ────────────────────────────────────────────
-MIN_CONFIDENCE      = 70
+MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 15
-MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
+SCAN_INTERVAL_MENIT = 5
+MIN_USDC_BALANCE    = 5.0
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS    = 5
-ENABLE_SELL           = True
-MAX_DAILY_LOSSES      = 4   # stop kalau kalah 4x dalam sehari
-ALERT_BALANCE_DROP_PCT = 20  # alert kalau saldo turun >20% dalam sehari
+MAX_OPEN_POSITIONS     = 5
+ENABLE_SELL            = True
+MAX_DAILY_LOSSES       = 4
+ALERT_BALANCE_DROP_PCT = 20
 
 # ── Saldo fiktif ───────────────────────────────────────────────
 VIRTUAL_START_BALANCE = 10.0
@@ -77,15 +81,25 @@ VIRTUAL_BALANCE_FILE = "virtual_balance.json"
 BOT_STATE_FILE       = "bot_state.json"
 LAST_REPORT_FILE     = "last_report.json"
 HISTORY_FILE         = "history.json"
-REAL_STATS_FILE      = "real_stats.json"
 GAMMA_API            = "https://gamma-api.polymarket.com"
 CLOB_API             = "https://clob.polymarket.com"
 POLYGONSCAN_TX       = "https://polygonscan.com/tx/"
 WIB                  = timezone(timedelta(hours=7))
 
 # ═══════════════════════════════════════════════════════════════
-#  LOGGING
+#  LOGGING — hanya tampil hal penting, HTTP request disembunyikan
 # ═══════════════════════════════════════════════════════════════
+
+class ImportantOnlyFilter(logging.Filter):
+    """Filter untuk sembunyikan log HTTP request biasa."""
+    def filter(self, record):
+        msg = record.getMessage()
+        # Sembunyikan log HTTP request biasa
+        if "HTTP Request:" in msg and "HTTP/1.1 200" in msg:
+            return False
+        if "HTTP Request:" in msg and "HTTP/2 200" in msg:
+            return False
+        return True
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +107,9 @@ logging.basicConfig(
     handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+# Tambah filter ke semua handler
+for handler in logging.getLogger().handlers:
+    handler.addFilter(ImportantOnlyFilter())
 
 # ═══════════════════════════════════════════════════════════════
 #  STATE & STORAGE
@@ -174,7 +191,7 @@ def team_already_held(question: str) -> bool:
     for pos in positions.values():
         existing_keys = set(_extract_team_keys(pos.get("question", "")))
         if len(new_keys & existing_keys) >= 2:
-            logger.info(f"Skip duplikat tim: '{question[:60]}'")
+            logger.info(f"⏭️ Skip duplikat tim: '{question[:50]}'")
             return True
     return False
 
@@ -189,6 +206,7 @@ def record_buy(market: dict, outcome: str, token_id: str, amount: float, fill_pr
         "shares":      round(amount / fill_price, 4) if fill_price > 0 else 0,
         "cost_usd":    amount,
         "opened_at":   datetime.now(timezone.utc).isoformat(),
+        "end_date":    market.get("end_date", ""),
     }
     save_positions(pos)
 
@@ -255,7 +273,6 @@ def update_daily_stats(pnl_delta: float, is_loss: bool = False):
 
 
 def daily_loss_exceeded() -> bool:
-    """Stop kalau sudah kalah MAX_DAILY_LOSSES kali hari ini."""
     stats = load_daily_stats()
     return stats.get("losses", 0) >= MAX_DAILY_LOSSES
 
@@ -283,7 +300,7 @@ async def tg_api(method: str, payload: dict) -> dict:
             )
             return r.json()
     except Exception as e:
-        logger.error(f"Telegram {method} error: {e}")
+        logger.error(f"❌ Telegram {method} error: {e}")
         return {}
 
 
@@ -293,6 +310,20 @@ async def tg_send(text: str, keyboard: list = None) -> bool:
     if keyboard:
         payload["reply_markup"] = {"inline_keyboard": keyboard}
     r = await tg_api("sendMessage", payload)
+    return bool(r.get("ok"))
+
+
+async def tg_send_photo(caption: str, keyboard: list = None) -> bool:
+    """Kirim foto robot trading dengan caption."""
+    payload = {
+        "chat_id":   TELEGRAM_CHAT_ID,
+        "photo":     BOT_IMAGE_URL,
+        "caption":   caption,
+        "parse_mode": "HTML",
+    }
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+    r = await tg_api("sendPhoto", payload)
     return bool(r.get("ok"))
 
 
@@ -319,7 +350,7 @@ async def tg_send_document(filename: str, content: bytes, caption: str = ""):
                 files={"document": (filename, content, "text/csv")},
             )
     except Exception as e:
-        logger.error(f"tg_send_document error: {e}")
+        logger.error(f"❌ tg_send_document error: {e}")
 
 
 # ── Keyboard builders ─────────────────────────────────────────
@@ -386,17 +417,20 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
         if not state.get("mode"):
             await tg_answer_callback(cb_id, "Pilih mode dulu")
             return
-        # Validasi wallet saat startup REAL
         if state.get("mode") == "REAL":
             ok, msg = await validate_wallet()
             if not ok:
                 await tg_answer_callback(cb_id, "❌ Wallet error")
-                await tg_send(f"❌ <b>Gagal koneksi wallet:</b>\n{msg}\nPeriksa key di kode.")
+                await tg_send(f"❌ <b>Gagal koneksi wallet:</b>\n{msg}")
                 return
         state["active"] = True
         save_state(state)
         await tg_answer_callback(cb_id, "Bot dimulai")
-        await tg_send("▶️ <b>BOT DIMULAI</b>\nScan & auto buy aktif.")
+        await tg_send_photo(
+            "🤖 <b>BOT DIMULAI</b>\n"
+            "Scan & auto buy aktif.\n"
+            f"Mode: <b>{state['mode']}</b> | Min confidence: {MIN_CONFIDENCE}%"
+        )
         return
 
     if data == "stop":
@@ -408,17 +442,17 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
 
     if data == "status":
         await tg_answer_callback(cb_id, "Status")
-        await tg_send(await build_status_text())
+        await tg_send_photo(await build_status_text())
         return
 
     if data == "pnl":
         await tg_answer_callback(cb_id, "Laporan PnL")
-        await tg_send(await build_pnl_text())
+        await tg_send_photo(await build_pnl_text())
         return
 
     if data == "history":
         await tg_answer_callback(cb_id, "Riwayat posisi")
-        await tg_send(build_history_text())
+        await tg_send_photo(build_history_text())
         return
 
     if data == "export":
@@ -454,7 +488,6 @@ async def build_status_text() -> str:
     positions = load_positions()
     history   = load_history()
     daily     = load_daily_stats()
-    now_wib   = datetime.now(WIB)
 
     lines = [
         "📊 <b>STATUS BOT</b>",
@@ -468,12 +501,11 @@ async def build_status_text() -> str:
         lines.append(f"Saldo fiktif: <b>${bal:.2f}</b>")
     elif mode == "REAL":
         bal = get_usdc_balance()
-        lines.append(f"Saldo USDC: <b>${bal:.2f}</b>")
+        lines.append(f"Saldo pUSD: <b>${bal:.2f}</b>")
 
     for mid, p in positions.items():
-        # Hitung unrealized PnL untuk posisi terbuka
-        end_dt  = p.get("end_date", "")
-        sisa    = ""
+        end_dt = p.get("end_date", "")
+        sisa   = ""
         if end_dt:
             try:
                 end_utc = datetime.fromisoformat(end_dt.replace("Z", "+00:00"))
@@ -483,7 +515,7 @@ async def build_status_text() -> str:
                     sisa = f" ⏳{h}j{m}m"
             except Exception:
                 pass
-        lines.append(f"• {p['question'][:55]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}")
+        lines.append(f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}")
     return "\n".join(lines)
 
 
@@ -513,16 +545,15 @@ async def build_pnl_text() -> str:
             f"📉 Status     : {status}", "",
         ]
     elif mode == "REAL":
-        bal        = get_usdc_balance()
-        start_bal  = daily.get("start_balance_real") or bal
-        pnl_today  = bal - start_bal
-        pct_today  = (pnl_today / start_bal * 100) if start_bal > 0 else 0
+        bal       = get_usdc_balance()
+        start_bal = daily.get("start_balance_real") or bal
+        pnl_today = bal - start_bal
+        pct_today = (pnl_today / start_bal * 100) if start_bal > 0 else 0
         lines += [
-            f"💵 Saldo USDC : <b>${bal:.2f}</b>",
+            f"💵 Saldo pUSD : <b>${bal:.2f}</b>",
             f"📊 PnL hari ini: <b>{pnl_today:+.2f} ({pct_today:+.1f}%)</b>", "",
         ]
 
-    # Unrealized PnL posisi terbuka
     if positions:
         lines.append("🔓 <b>Posisi terbuka:</b>")
         for p in positions.values():
@@ -573,7 +604,7 @@ def build_history_text(limit: int = 10) -> str:
         lines.append(
             f"{emoji} {h['tanggal']} | {h['outcome']} | "
             f"${h['pnl_usd']:+.2f} ({h['pnl_pct']:+.1f}%)\n"
-            f"   {h['question'][:55]}"
+            f"   {h['question'][:50]}"
         )
     return "\n".join(lines)
 
@@ -620,7 +651,7 @@ async def telegram_poll_loop():
             )
         logger.info("✅ Drop pending updates selesai")
     except Exception as e:
-        logger.warning(f"Drop updates error: {e}")
+        logger.warning(f"⚠️ Drop updates error: {e}")
 
     offset = 0
     while True:
@@ -637,7 +668,7 @@ async def telegram_poll_loop():
                 data = r.json()
 
             if not data.get("ok") and data.get("error_code") == 409:
-                logger.warning("409 Conflict: ada instance lain, tunggu 10 detik...")
+                logger.warning("⚠️ 409 Conflict: ada instance lain, tunggu 10 detik...")
                 await asyncio.sleep(10)
                 continue
 
@@ -650,12 +681,14 @@ async def telegram_poll_loop():
                 elif "message" in upd:
                     txt = (upd["message"].get("text") or "").strip()
                     if txt == "/start":
-                        await tg_send("🚀 <b>BOT POLYMARKET</b>\n\nPilih mode dana:",
-                                      kb_mode_select())
+                        await tg_send_photo(
+                            "🤖 <b>BOT POLYMARKET</b>\n\nPilih mode dana:",
+                            kb_mode_select()
+                        )
                     elif txt == "/menu":
                         await tg_send("🎛️ Menu utama:", kb_main())
         except Exception as e:
-            logger.warning(f"TG poll error: {e}")
+            logger.warning(f"⚠️ TG poll error: {e}")
             await asyncio.sleep(5)
         await asyncio.sleep(1)
 
@@ -664,14 +697,27 @@ async def telegram_poll_loop():
 #  POLYMARKET CLIENT — Magic.link (signature_type=1, gasless)
 # ═══════════════════════════════════════════════════════════════
 
+def _get_clob_client():
+    from py_clob_client.client import ClobClient
+    from py_clob_client.constants import POLYGON
+    client = ClobClient(
+        host=CLOB_API,
+        key=POLYMARKET_WALLET_KEY,
+        chain_id=POLYGON,
+        signature_type=1,
+        funder=POLYMARKET_FUNDER_ADDRESS or None,
+    )
+    client.set_api_creds(client.create_or_derive_api_creds())
+    return client
+
+
 async def validate_wallet() -> tuple[bool, str]:
-    """Validasi wallet saat startup REAL."""
     if not POLYMARKET_WALLET_KEY or not POLYMARKET_FUNDER_ADDRESS:
         return False, "POLYMARKET_WALLET_KEY atau FUNDER_ADDRESS kosong"
     try:
         bal = get_usdc_balance()
         if bal >= 0:
-            return True, f"Saldo USDC: ${bal:.2f}"
+            return True, f"Saldo pUSD: ${bal:.2f}"
         return False, "Gagal ambil saldo"
     except Exception as e:
         return False, str(e)
@@ -705,7 +751,7 @@ async def _fetch_markets_in_window(hours: float, sports_only: bool = False) -> l
 
     if sports_only:
         markets = [m for m in markets if _is_sports_market(m.get("question", ""))]
-        logger.info(f"Filter sports keyword: {len(markets)} market lolos")
+        logger.info(f"🔍 Filter sports: {len(markets)} market lolos")
 
     return markets
 
@@ -744,20 +790,20 @@ async def get_top_markets() -> tuple[list[dict], str]:
         for hours, label in [
             (LIVE_HOURS,       f"⚡ Live ≤ {LIVE_HOURS} jam"),
             (HOURS_TO_CLOSE,   f"🏆 Olahraga ≤ {HOURS_TO_CLOSE} jam"),
-            (FALLBACK_1_HOURS, f"🏆 Olahraga ≤ {FALLBACK_1_HOURS} jam (fallback 1)"),
-            (FALLBACK_2_HOURS, f"🏆 Olahraga ≤ {FALLBACK_2_HOURS} jam (fallback 2)"),
+            (FALLBACK_1_HOURS, f"🏆 Olahraga ≤ {FALLBACK_1_HOURS} jam"),
+            (FALLBACK_2_HOURS, f"🏆 Olahraga ≤ {FALLBACK_2_HOURS} jam"),
         ]:
             markets = await _fetch_markets_in_window(hours, sports_only=True)
             result  = [p for p in (_parse_market(m) for m in markets) if p][:TOP_MARKETS]
             if result:
-                logger.info(f"✅ {len(result)} market ({label})")
+                logger.info(f"✅ {len(result)} market ditemukan ({label})")
                 return result, label
 
         markets = await _fetch_markets_in_window(FALLBACK_2_HOURS, sports_only=False)
         result  = [p for p in (_parse_market(m) for m in markets) if p][:TOP_MARKETS]
         if result:
             label = f"🌐 Semua kategori ≤ {FALLBACK_2_HOURS} jam"
-            logger.info(f"⚠️ Fallback semua kategori: {len(result)} market")
+            logger.info(f"⚠️ Fallback: {len(result)} market")
             return result, label
 
         return [], "0 market"
@@ -773,86 +819,62 @@ async def get_market_status(market_id: str) -> dict | None:
             r.raise_for_status()
             return r.json()
     except Exception as e:
-        logger.warning(f"Market status error {market_id}: {e}")
+        logger.warning(f"⚠️ Market status error {market_id}: {e}")
         return None
 
 
 # ── Helper wallet ──────────────────────────────────────────────
 
 def get_usdc_balance() -> float:
-    """Ambil saldo USDC via Polygon RPC langsung, tanpa py_clob_client."""
     try:
-        # pUSD contract Polymarket di Polygon
-        USDC_CONTRACT = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
-        # balanceOf(address) = keccak256 4 bytes = 0x70a08231
+        PUSD_CONTRACT = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
         padded = POLYMARKET_FUNDER_ADDRESS.lower().replace("0x", "").zfill(64)
         data   = "0x70a08231" + padded
         payload = {
             "jsonrpc": "2.0", "id": 1,
             "method": "eth_call",
-            "params": [{"to": USDC_CONTRACT, "data": data}, "latest"],
+            "params": [{"to": PUSD_CONTRACT, "data": data}, "latest"],
         }
         import httpx as _h
-        # Coba beberapa RPC sampai berhasil
         rpc_list = [
             "https://rpc.ankr.com/polygon",
             "https://polygon-bor-rpc.publicnode.com",
             "https://1rpc.io/matic",
         ]
-        r = None
         for rpc in rpc_list:
             try:
-                r = _h.post(rpc, json=payload, timeout=10)
-                if r.json().get("result"):
-                    break
+                r   = _h.post(rpc, json=payload, timeout=10)
+                raw = r.json().get("result")
+                if raw:
+                    return round(int(raw, 16) / 1e6, 4)
             except Exception:
                 continue
-        raw = r.json().get("result", "0x0")
-        bal = int(raw, 16) / 1e6  # USDC 6 desimal
-        return round(bal, 4)
+        return 0.0
     except Exception as e:
-        logger.error(f"Balance error: {e}")
+        logger.error(f"❌ Balance error: {e}")
         return 0.0
 
 
 def get_best_bid(token_id: str) -> float | None:
-    """Ambil harga bid via CLOB API langsung."""
     try:
         import httpx as _h
         r = _h.get(f"{CLOB_API}/price",
                    params={"token_id": token_id, "side": "SELL"}, timeout=10)
-        data = r.json()
-        return float(data.get("price", 0))
+        return float(r.json().get("price", 0))
     except Exception as e:
-        logger.error(f"get_best_bid error: {e}")
+        logger.error(f"❌ get_best_bid error: {e}")
         return None
 
 
 def get_best_ask(token_id: str) -> float | None:
-    """Ambil harga ask via CLOB API langsung."""
     try:
         import httpx as _h
         r = _h.get(f"{CLOB_API}/price",
                    params={"token_id": token_id, "side": "BUY"}, timeout=10)
-        data = r.json()
-        return float(data.get("price", 0))
+        return float(r.json().get("price", 0))
     except Exception as e:
-        logger.error(f"get_best_ask error: {e}")
+        logger.error(f"❌ get_best_ask error: {e}")
         return None
-
-
-def _get_clob_client():
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    client = ClobClient(
-        host=CLOB_API,
-        key=POLYMARKET_WALLET_KEY,
-        chain_id=POLYGON,
-        signature_type=1,
-        funder=POLYMARKET_FUNDER_ADDRESS or None,
-    )
-    client.set_api_creds(client.create_or_derive_api_creds())
-    return client
 
 
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
@@ -864,22 +886,18 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         from py_clob_client.order_builder.constants import BUY
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
-            return {"success": False, "error": "Minimal $1 USDC per order"}
-        client = _get_clob_client()
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=amount_usd,
-            side=BUY,
-        )
-        signed = client.create_market_order(order_args)
-        resp = client.post_order(signed)
-        logger.info(f"Order response: {resp}")
+            return {"success": False, "error": "Minimal $1 per order"}
+        client     = _get_clob_client()
+        order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
+        signed     = client.create_market_order(order_args)
+        resp       = client.post_order(signed)
+        logger.info(f"📋 Order response: {resp}")
         if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
         return {"success": True, "order": resp,
                 "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
     except Exception as e:
-        logger.error(f"buy_outcome exception: {e}")
+        logger.error(f"❌ buy_outcome error: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -891,20 +909,18 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         from py_clob_client.clob_types import MarketOrderArgs
         from py_clob_client.order_builder.constants import SELL
         if shares < 1.0:
-            return {"success": False, "error": "Share terlalu kecil (< 1)"}
-        client = _get_clob_client()
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=round(shares, 4),
-            side=SELL,
-        )
-        signed = client.create_market_order(order_args)
-        resp = client.post_order(signed)
+            return {"success": False, "error": "Share terlalu kecil"}
+        client     = _get_clob_client()
+        order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
+        signed     = client.create_market_order(order_args)
+        resp       = client.post_order(signed)
+        logger.info(f"📋 Sell response: {resp}")
         if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
         return {"success": True, "order": resp,
                 "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
     except Exception as e:
+        logger.error(f"❌ sell_outcome error: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -945,31 +961,23 @@ async def get_news(query: str, max_items: int = 4) -> str:
             return "Tidak ada berita terkait"
         return "\n".join(f"- {(it.findtext('title') or '').strip()}" for it in items)
     except Exception as e:
-        logger.warning(f"News error: {e}")
+        logger.warning(f"⚠️ News error: {e}")
         return "Berita tidak tersedia"
 
 
 async def analyze_market(market: dict) -> dict:
     news   = await get_news(market["question"])
-    prompt = f"""Kamu adalah analis prediction market profesional, spesialis olahraga.
+    prompt = f"""Kamu adalah analis prediction market profesional.
 
 PERTANYAAN: {market['question']}
-KATEGORI: {market.get('category') or 'Sports'}
 BERAKHIR: {market.get('end_date') or '?'}
 HARGA YES: {market['yes_price']:.2%} | HARGA NO: {market['no_price']:.2%}
 
-BERITA TERKINI:
+BERITA:
 {news}
 
-Market tutup dalam hitungan jam. Fokus apa yang mungkin terjadi SEBELUM tutup.
-
-Jawab HANYA JSON valid:
-{{
-  "signal": "BUY_YES" atau "BUY_NO" atau "SKIP",
-  "confidence": angka 0-100,
-  "recommended_outcome": "YES" atau "NO" atau "SKIP",
-  "reasoning": "max 10 kata bahasa Indonesia"
-}}"""
+Jawab HANYA JSON valid tanpa teks lain:
+{{"signal":"BUY_YES","confidence":80,"recommended_outcome":"YES","reasoning":"alasan singkat"}}"""
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post("https://api.groq.com/openai/v1/chat/completions",
@@ -977,23 +985,30 @@ Jawab HANYA JSON valid:
                                       "Content-Type": "application/json"},
                              json={"model": GROQ_MODEL,
                                    "messages": [{"role": "user", "content": prompt}],
-                                   "temperature": 0.2, "max_tokens": 150})
+                                   "temperature": 0.1,
+                                   "max_tokens": 150})
             r.raise_for_status()
-            raw_content = r.json()["choices"][0]["message"]["content"].strip()
-            # Coba extract JSON dari response meski ada teks tambahan
-            import re
-            json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-            if not json_match:
-                raise ValueError(f"Tidak ada JSON di response: {raw_content[:100]}")
-            result = json.loads(json_match.group())
+            raw = r.json()["choices"][0]["message"]["content"].strip()
+
+        # Extract JSON dari response
+        json_match = re.search(r'\{[^{}]*\}', raw, re.DOTALL)
+        if not json_match:
+            logger.warning(f"⚠️ Groq no JSON: {raw[:80]}")
+            return {"signal": "SKIP", "confidence": 0,
+                    "recommended_outcome": "SKIP", "recommended_token": None}
+
+        result  = json.loads(json_match.group())
         outcome = result.get("recommended_outcome", "SKIP")
+        conf    = int(result.get("confidence", 0) or 0)
+        logger.info(f"🧠 Groq: {outcome} | conf={conf}% | {result.get('reasoning','')[:50]}")
+
         result["recommended_token"] = (
             market["token_yes"] if outcome == "YES"
             else market["token_no"] if outcome == "NO" else None)
         return result
     except Exception as e:
-        logger.error(f"Groq error: {e}")
-        return {"signal": "SKIP", "confidence": 0, "reasoning": str(e),
+        logger.error(f"❌ Groq error: {e}")
+        return {"signal": "SKIP", "confidence": 0,
                 "recommended_outcome": "SKIP", "recommended_token": None}
 
 
@@ -1042,8 +1057,10 @@ async def manage_open_positions() -> int:
                     close_position(market_id, realized_pnl=gain - pos["cost_usd"],
                                    exit_price=1.0, reason="MENANG")
                     sold += 1
-                    await tg_send(f"🎉 <b>MENANG (DEMO)</b>\n{pos['question'][:80]}\n"
-                                  f"+${gain:.2f} → saldo ${bal:.2f}")
+                    await tg_send_photo(
+                        f"🎉 <b>MENANG (DEMO)</b>\n{pos['question'][:80]}\n"
+                        f"+${gain:.2f} → saldo ${bal:.2f}"
+                    )
                 else:
                     res = redeem_position(market_id, status.get("conditionId", ""))
                     if res.get("success"):
@@ -1052,16 +1069,20 @@ async def manage_open_positions() -> int:
                         close_position(market_id, realized_pnl=gain - pos["cost_usd"],
                                        exit_price=1.0, reason="MENANG")
                         sold += 1
-                        await tg_send(f"🎉 <b>CLAIM BERHASIL</b>\n"
-                                      f"{pos['question'][:80]}\n+${gain:.2f}{tx_link}")
+                        await tg_send_photo(
+                            f"🎉 <b>CLAIM BERHASIL</b>\n"
+                            f"{pos['question'][:80]}\n+${gain:.2f}{tx_link}"
+                        )
                     else:
                         await tg_send(f"❌ Claim gagal: {res.get('error')}\n"
                                       f"Claim manual: {pos['question'][:80]}")
             else:
                 close_position(market_id, realized_pnl=-pos["cost_usd"],
                                exit_price=0.0, reason="KALAH")
-                await tg_send(f"❌ <b>KALAH</b>\n{pos['question'][:80]}\n"
-                              f"-${pos['cost_usd']:.2f}")
+                await tg_send_photo(
+                    f"❌ <b>KALAH</b>\n{pos['question'][:80]}\n"
+                    f"-${pos['cost_usd']:.2f}"
+                )
             continue
 
         # Exit atas 0.99
@@ -1075,8 +1096,10 @@ async def manage_open_positions() -> int:
                 close_position(market_id, realized_pnl=gain - pos["cost_usd"],
                                exit_price=bid, reason="EXIT")
                 sold += 1
-                await tg_send(f"✅ <b>EXIT 0.99 (DEMO)</b>\n{pos['question'][:80]}\n"
-                              f"+${gain - pos['cost_usd']:+.2f} → saldo ${bal:.2f}")
+                await tg_send_photo(
+                    f"✅ <b>EXIT 0.99 (DEMO)</b>\n{pos['question'][:80]}\n"
+                    f"+${gain - pos['cost_usd']:+.2f} → saldo ${bal:.2f}"
+                )
             else:
                 res = sell_outcome(token_id, shares)
                 if res.get("success"):
@@ -1085,8 +1108,10 @@ async def manage_open_positions() -> int:
                     close_position(market_id, realized_pnl=gain - pos["cost_usd"],
                                    exit_price=bid, reason="EXIT")
                     sold += 1
-                    await tg_send(f"✅ <b>JUAL 0.99</b>\n{pos['question'][:80]}\n"
-                                  f"+${gain - pos['cost_usd']:+.2f}{tx_link}")
+                    await tg_send_photo(
+                        f"✅ <b>JUAL 0.99</b>\n{pos['question'][:80]}\n"
+                        f"+${gain - pos['cost_usd']:+.2f}{tx_link}"
+                    )
     return sold
 
 
@@ -1099,15 +1124,15 @@ async def maybe_send_hourly_report():
     if now.minute > 5:
         return
     key  = now.strftime("%Y-%m-%d-%H")
-    last = _load_json(LAST_REPORT_FILE, {"last": ""})
+    last = _load_json(LAST_REPORT_FILE, {"last": "", "midnight": ""})
     if last.get("last") == key:
         return
-    _save_json(LAST_REPORT_FILE, {"last": key})
-    await tg_send(await build_pnl_text())
+    last["last"] = key
+    _save_json(LAST_REPORT_FILE, last)
+    await tg_send_photo(await build_pnl_text())
 
 
 async def maybe_send_midnight_report():
-    """Laporan harian otomatis tiap tengah malam."""
     now = datetime.now(WIB)
     if now.hour != 0 or now.minute > 5:
         return
@@ -1127,7 +1152,7 @@ async def maybe_send_midnight_report():
     kalah     = sum(1 for h in today_h if h.get("hasil") == "KALAH")
     pnl_today = sum(h.get("pnl_usd", 0) for h in today_h)
     wr        = (menang / len(today_h) * 100) if today_h else 0
-    await tg_send(
+    await tg_send_photo(
         f"🌙 <b>LAPORAN HARIAN — {today_str}</b>\n"
         f"Trade: {len(today_h)} | ✅ {menang} menang | ❌ {kalah} kalah\n"
         f"Win Rate: {wr:.1f}% | PnL: <b>${pnl_today:+.2f}</b>"
@@ -1135,37 +1160,25 @@ async def maybe_send_midnight_report():
 
 
 async def check_real_balance_alert():
-    """Alert kalau saldo REAL turun >20% dari awal hari."""
     if is_demo():
         return
     stats = load_daily_stats()
     bal   = get_usdc_balance()
 
-    # Simpan saldo awal hari kalau belum ada
     if not stats.get("start_balance_real"):
         stats["start_balance_real"] = bal
         _save_json(DAILY_STATS_FILE, stats)
         return
 
-    start = stats["start_balance_real"]
-    if start <= 0:
-        return
-    drop_pct = ((start - bal) / start) * 100
+    start    = stats["start_balance_real"]
+    drop_pct = ((start - bal) / start * 100) if start > 0 else 0
     if drop_pct >= ALERT_BALANCE_DROP_PCT:
         await tg_send(
-            f"🚨 <b>ALERT SALDO TURUN</b>\n"
-            f"Saldo turun {drop_pct:.1f}% hari ini!\n"
-            f"Awal: ${start:.2f} → Sekarang: ${bal:.2f}\n"
-            f"Pertimbangkan untuk STOP trading hari ini."
+            f"🚨 <b>ALERT SALDO TURUN {drop_pct:.1f}%</b>\n"
+            f"Awal: ${start:.2f} → Sekarang: ${bal:.2f}"
         )
-
-    # Alert saldo < MIN_USDC_BALANCE
     if bal < MIN_USDC_BALANCE:
-        await tg_send(
-            f"⚠️ <b>SALDO USDC RENDAH</b>\n"
-            f"Saldo tersisa: <b>${bal:.2f}</b>\n"
-            f"Minimal disarankan: ${MIN_USDC_BALANCE:.2f}"
-        )
+        await tg_send(f"⚠️ <b>SALDO RENDAH: ${bal:.2f}</b>")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1177,24 +1190,20 @@ async def run_cycle():
     if not state.get("active"):
         return
 
-    # Cek daily loss (4x kalah)
     if daily_loss_exceeded():
         await tg_send(
             f"🛑 <b>DAILY LOSS LIMIT</b>\n"
-            f"Sudah kalah {MAX_DAILY_LOSSES}x hari ini. Bot stop otomatis.\n"
-            f"Coba lagi besok."
+            f"Sudah kalah {MAX_DAILY_LOSSES}x hari ini. Bot stop otomatis."
         )
         state["active"] = False
         save_state(state)
         return
 
-    # Alert saldo REAL
     await check_real_balance_alert()
-
     await manage_open_positions()
     markets, label = await get_top_markets()
     if not markets:
-        logger.info("Tidak ada market di window.")
+        logger.info("💤 Tidak ada market di window.")
         return
 
     demo = is_demo()
@@ -1210,7 +1219,6 @@ async def run_cycle():
         sig      = analysis.get("signal", "SKIP")
         conf     = int(analysis.get("confidence", 0) or 0)
         if sig == "SKIP" or conf < MIN_CONFIDENCE:
-            await asyncio.sleep(1)
             continue
         token = analysis.get("recommended_token")
         if not token:
@@ -1226,7 +1234,7 @@ async def run_cycle():
         else:
             bal = get_usdc_balance()
             if bal < MAX_BET_PER_MARKET:
-                await tg_send(f"⚠️ USDC tidak cukup: ${bal:.2f}")
+                await tg_send(f"⚠️ pUSD tidak cukup: ${bal:.2f}")
                 return
             amount = MAX_BET_PER_MARKET
             ask    = get_best_ask(token)
@@ -1239,13 +1247,15 @@ async def run_cycle():
                 save_virtual_balance(load_virtual_balance() - amount)
             record_buy(m, analysis["recommended_outcome"], token, amount, ask)
             tx_link = _polygonscan_link(res.get("tx_hash", "")) if not demo else ""
-            await tg_send(
+            await tg_send_photo(
                 f"🛒 <b>BELI {'DEMO' if demo else 'REAL'}</b> [{label}]\n"
-                f"{m['question'][:100]}\n"
-                f"{analysis['recommended_outcome']} @ {ask:.2f} — ${amount:.2f}\n"
-                f"Confidence: {conf}%\n"
+                f"📌 {m['question'][:90]}\n"
+                f"🎯 {analysis['recommended_outcome']} @ {ask:.2f} — ${amount:.2f}\n"
+                f"📊 Confidence: {conf}%\n"
                 f"🧠 {analysis.get('reasoning', '-')}{tx_link}"
             )
+        else:
+            logger.error(f"❌ Beli gagal: {res.get('error')}")
         await asyncio.sleep(2)
 
 
@@ -1259,13 +1269,26 @@ async def main():
     if not GROQ_API_KEY or GROQ_API_KEY.startswith("ISI_"):
         raise RuntimeError("GROQ_API_KEY belum diisi")
 
+    # Reset active state saat startup — harus klik MULAI dulu
+    state = load_state()
+    if state.get("active"):
+        state["active"] = False
+        save_state(state)
+        logger.info("🔄 State direset — klik MULAI TES untuk mulai")
+
     asyncio.create_task(telegram_poll_loop())
 
-    state = load_state()
     if not state.get("mode"):
-        await tg_send("🚀 <b>BOT POLYMARKET</b>\n\nPilih mode dana:", kb_mode_select())
+        await tg_send_photo(
+            "🤖 <b>BOT POLYMARKET</b>\n\nPilih mode dana:",
+            kb_mode_select()
+        )
     else:
-        await tg_send(f"🚀 Bot aktif. Mode: <b>{state['mode']}</b>", kb_main())
+        await tg_send_photo(
+            f"🤖 Bot siap. Mode: <b>{state['mode']}</b>\n"
+            f"Klik ▶️ MULAI TES untuk mulai scan.",
+            kb_main()
+        )
 
     while True:
         try:
@@ -1273,7 +1296,7 @@ async def main():
             await maybe_send_hourly_report()
             await maybe_send_midnight_report()
         except Exception as e:
-            logger.exception("Cycle error")
+            logger.exception("❌ Cycle error")
             await tg_send(f"⚠️ Bot error: {e}")
         await asyncio.sleep(SCAN_INTERVAL_MENIT * 60)
 
