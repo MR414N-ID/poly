@@ -58,13 +58,13 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 70
 MAX_BET_PER_MARKET  = 2.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 7
+SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
 MAX_OPEN_POSITIONS    = 5
 ENABLE_SELL           = True
-MAX_DAILY_LOSSES      = 5   # stop kalau kalah 4x dalam sehari
+MAX_DAILY_LOSSES      = 4   # stop kalau kalah 4x dalam sehari
 ALERT_BALANCE_DROP_PCT = 20  # alert kalau saldo turun >20% dalam sehari
 
 # ── Saldo fiktif ───────────────────────────────────────────────
@@ -873,11 +873,13 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         )
         signed = client.create_market_order(order_args)
         resp = client.post_order(signed)
+        logger.info(f"Order response: {resp}")
         if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
         return {"success": True, "order": resp,
                 "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
     except Exception as e:
+        logger.error(f"buy_outcome exception: {e}")
         return {"success": False, "error": str(e)}
 
 
@@ -975,7 +977,7 @@ Jawab HANYA JSON valid:
                                       "Content-Type": "application/json"},
                              json={"model": GROQ_MODEL,
                                    "messages": [{"role": "user", "content": prompt}],
-                                   "temperature": 0.2, "max_tokens": 300})
+                                   "temperature": 0.2, "max_tokens": 500})
             r.raise_for_status()
             raw_content = r.json()["choices"][0]["message"]["content"].strip()
             # Coba extract JSON dari response meski ada teks tambahan
