@@ -56,15 +56,15 @@ MAX_ODDS = 0.60
 
 # ── Setting trading ────────────────────────────────────────────
 MIN_CONFIDENCE      = 70
-MAX_BET_PER_MARKET  = 1.0
+MAX_BET_PER_MARKET  = 2.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 10
+SCAN_INTERVAL_MENIT = 7
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
 MAX_OPEN_POSITIONS    = 5
 ENABLE_SELL           = True
-MAX_DAILY_LOSSES      = 4   # stop kalau kalah 4x dalam sehari
+MAX_DAILY_LOSSES      = 5   # stop kalau kalah 4x dalam sehari
 ALERT_BALANCE_DROP_PCT = 20  # alert kalau saldo turun >20% dalam sehari
 
 # ── Saldo fiktif ───────────────────────────────────────────────
@@ -860,19 +860,23 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs
         from py_clob_client.order_builder.constants import BUY
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
             return {"success": False, "error": "Minimal $1 USDC per order"}
         client = _get_clob_client()
-        signed = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY))
-        resp = client.post_order(signed, orderType=OrderType.FOK)
-        if resp.get("errorMsg"):
+        order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=amount_usd,
+            side=BUY,
+        )
+        signed = client.create_market_order(order_args)
+        resp = client.post_order(signed)
+        if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
         return {"success": True, "order": resp,
-                "tx_hash": resp.get("transactionHash", "")}
+                "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -882,18 +886,22 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
+        from py_clob_client.clob_types import MarketOrderArgs
         from py_clob_client.order_builder.constants import SELL
         if shares < 1.0:
             return {"success": False, "error": "Share terlalu kecil (< 1)"}
         client = _get_clob_client()
-        signed = client.create_market_order(
-            MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL))
-        resp = client.post_order(signed, orderType=OrderType.FOK)
-        if resp.get("errorMsg"):
+        order_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=round(shares, 4),
+            side=SELL,
+        )
+        signed = client.create_market_order(order_args)
+        resp = client.post_order(signed)
+        if isinstance(resp, dict) and resp.get("errorMsg"):
             return {"success": False, "error": resp["errorMsg"]}
         return {"success": True, "order": resp,
-                "tx_hash": resp.get("transactionHash", "")}
+                "tx_hash": resp.get("transactionHash", "") if isinstance(resp, dict) else ""}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -969,7 +977,13 @@ Jawab HANYA JSON valid:
                                    "messages": [{"role": "user", "content": prompt}],
                                    "temperature": 0.2, "max_tokens": 300})
             r.raise_for_status()
-            result = json.loads(r.json()["choices"][0]["message"]["content"].strip())
+            raw_content = r.json()["choices"][0]["message"]["content"].strip()
+            # Coba extract JSON dari response meski ada teks tambahan
+            import re
+            json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+            if not json_match:
+                raise ValueError(f"Tidak ada JSON di response: {raw_content[:100]}")
+            result = json.loads(json_match.group())
         outcome = result.get("recommended_outcome", "SKIP")
         result["recommended_token"] = (
             market["token_yes"] if outcome == "YES"
