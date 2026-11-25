@@ -56,9 +56,9 @@ MAX_ODDS = 0.60
 
 # ── Setting trading ────────────────────────────────────────────
 MIN_CONFIDENCE      = 70
-MAX_BET_PER_MARKET  = 1.0
+MAX_BET_PER_MARKET  = 2.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 15
+SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0   # notif kalau saldo REAL < $5
 
 # ── Risk management ────────────────────────────────────────────
