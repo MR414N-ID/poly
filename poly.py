@@ -62,7 +62,7 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 15
+SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
 # ── Risk management ────────────────────────────────────────────
