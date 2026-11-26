@@ -51,8 +51,8 @@ SPORTS_KEYWORDS = [
     "leading", "halftime", "both teams", "first half", "second half",
 ]
 
-MIN_ODDS = 0.35
-MAX_ODDS = 0.65
+MIN_ODDS = 0.40
+MAX_ODDS = 0.60
 
 MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
@@ -1073,17 +1073,18 @@ PERTANYAAN: {market['question']}
 BERAKHIR: {market.get('end_date') or '?'}
 HARGA YES: {market['yes_price']:.2%} | HARGA NO: {market['no_price']:.2%}
 
-BERITA TERKINI:
+BERITA (bisa kosong):
 {news}
 
-ATURAN WAJIB:
-1. Jika ada bukti kuat (berita/statistik) dukung YES → signal BUY_YES, confidence 70-90
-2. Jika tidak ada bukti kuat → signal SKIP, confidence 0
-3. JANGAN pernah beri confidence 50-59, itu zona abu-abu — pilih SKIP atau minimal 65
-4. Confidence hanya boleh: 0 (SKIP), 65, 70, 75, 80, 85, 90
+CARA ANALISIS:
+1. Gunakan harga pasar sebagai sinyal utama — harga YES>55% artinya pasar prediksi YES lebih mungkin
+2. Gunakan pengetahuan kamu tentang tim, liga, dan statistik historis
+3. Berita hanya bonus — kalau tidak ada berita, tetap beri prediksi dari harga dan pengetahuan
+4. Pilih YES atau NO yang lebih mungkin terjadi, beri confidence 60-90
+5. Hanya SKIP kalau benar-benar tidak bisa diprediksi sama sekali
 
-Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick, tanpa spasi ekstra:
-{{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 10 kata"}}"""
+Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick:
+{{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 8 kata"}}"""
 
     try:
         async with httpx.AsyncClient(timeout=30) as c:
@@ -1337,6 +1338,7 @@ async def run_cycle():
         if not can_open_new_position():
             break
 
+        await asyncio.sleep(2)  # delay agar Google News tidak 429
         analysis = await analyze_market(m)
         sig      = analysis.get("signal", "SKIP")
         conf     = int(analysis.get("confidence", 0) or 0)
