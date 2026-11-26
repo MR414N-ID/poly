@@ -32,17 +32,14 @@ GROQ_MODEL                = "qwen/qwen3.8-27b"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
 
-# ── Gambar robot trading ───────────────────────────────────────
 BOT_IMAGE_URL = "https://i.ibb.co/KpS4ZD3R/file-0000000096888211b59a5bc34420ef0c.png"
 
-# ── Filter market (window jam) ─────────────────────────────────
 LIVE_HOURS       = 2
 HOURS_TO_CLOSE   = 6
 FALLBACK_1_HOURS = 12
 FALLBACK_2_HOURS = 20
 TOP_MARKETS      = 10
 
-# ── Keywords deteksi market sports ────────────────────────────
 SPORTS_KEYWORDS = [
     "win", "beat", "defeat", "match", "game", "final", "championship",
     "league", "cup", "tournament", "nfl", "nba", "nhl", "mlb", "mls",
@@ -54,27 +51,22 @@ SPORTS_KEYWORDS = [
     "leading", "halftime", "both teams", "first half", "second half",
 ]
 
-# ── Filter harga ───────────────────────────────────────────────
 MIN_ODDS = 0.40
 MAX_ODDS = 0.60
 
-# ── Setting trading ────────────────────────────────────────────
 MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
 SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
-# ── Risk management ────────────────────────────────────────────
 MAX_OPEN_POSITIONS     = 3
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 3
 ALERT_BALANCE_DROP_PCT = 20
 
-# ── Saldo fiktif ───────────────────────────────────────────────
 VIRTUAL_START_BALANCE = 10.0
 
-# ── File / API ─────────────────────────────────────────────────
 POSITIONS_FILE       = "positions.json"
 DAILY_STATS_FILE     = "daily_stats.json"
 VIRTUAL_BALANCE_FILE = "virtual_balance.json"
@@ -323,20 +315,6 @@ async def tg_send_photo(caption: str, keyboard: list = None) -> bool:
     return True
 
 
-async def tg_edit(message_id: int, text: str, keyboard: list = None):
-    """Edit pesan teks biasa — skip kalau gagal (pesan sudah expired/foto)."""
-    payload = {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id,
-               "text": text, "parse_mode": "HTML",
-               "disable_web_page_preview": True}
-    if keyboard:
-        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
-    r = await tg_api("editMessageText", payload)
-    # FIX: kalau edit gagal (pesan foto/expired), kirim pesan baru
-    if not r.get("ok"):
-        logger.warning(f"⚠️ editMessageText gagal (msg_id={message_id}), kirim baru")
-        await tg_send(text, keyboard)
-
-
 async def tg_answer_callback(cb_id: str, text: str = ""):
     await tg_api("answerCallbackQuery", {"callback_query_id": cb_id, "text": text})
 
@@ -355,7 +333,7 @@ async def tg_send_document(filename: str, content: bytes, caption: str = ""):
         logger.error(f"❌ tg_send_document error: {e}")
 
 
-# ── Keyboard builders ─────────────────────────────────────────
+# ── Keyboard builders ──────────────────────────────────────────
 
 def kb_mode_select():
     return [
@@ -379,6 +357,9 @@ def kb_main():
 
 # ═══════════════════════════════════════════════════════════════
 #  TELEGRAM CALLBACK HANDLER
+#  FIX: Semua response pakai tg_send (pesan baru), tidak ada
+#       tg_edit sama sekali karena pesan awal adalah foto
+#       dan editMessageText tidak bisa edit pesan foto → 400
 # ═══════════════════════════════════════════════════════════════
 
 async def handle_callback(data: str, cb_id: str, message_id: int):
@@ -387,8 +368,10 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
     if data == "change_mode":
         save_state({"mode": None, "active": False})
         await tg_answer_callback(cb_id, "Pilih mode")
-        # FIX: kirim pesan baru daripada edit (avoid 400 pada pesan foto)
-        await tg_send("🔀 <b>GANTI MODE</b>\n\nPilih mode dana:", kb_mode_select())
+        await tg_send(
+            "🔀 <b>GANTI MODE</b>\n\nPilih mode dana:",
+            kb_mode_select()
+        )
         return
 
     if data.startswith("mode_"):
@@ -397,28 +380,35 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
             if not POLYMARKET_WALLET_KEY or POLYMARKET_WALLET_KEY.startswith("ISI_") \
                or not POLYMARKET_FUNDER_ADDRESS or POLYMARKET_FUNDER_ADDRESS.startswith("ISI_"):
                 await tg_answer_callback(cb_id, "⚠️ Wallet belum diisi")
-                await tg_send("⚠️ Mode REAL butuh <code>POLYMARKET_WALLET_KEY</code> "
-                              "dan <code>POLYMARKET_FUNDER_ADDRESS</code>.\nPakai DEMO dulu.")
+                await tg_send(
+                    "⚠️ Mode REAL butuh <code>POLYMARKET_WALLET_KEY</code> "
+                    "dan <code>POLYMARKET_FUNDER_ADDRESS</code>.\nPakai DEMO dulu."
+                )
                 return
             save_state({"mode": "REAL", "active": False})
-            await tg_answer_callback(cb_id, "Mode REAL dipilih")
-            # FIX: kirim pesan baru + keyboard (tidak edit pesan foto)
+            await tg_answer_callback(cb_id, "✅ Mode REAL dipilih")
+            # FIX: kirim pesan BARU dengan kb_main, tidak edit pesan foto
             await tg_send(
                 "✅ Mode: 💵 <b>DANA REAL</b>\n\n"
-                "Klik ▶️ MULAI TES untuk mulai.", kb_main())
+                "Pilih aksi:",
+                kb_main()
+            )
         else:
             save_state({"mode": "DEMO", "active": False})
             bal = load_virtual_balance()
-            await tg_answer_callback(cb_id, "Mode DEMO dipilih")
+            await tg_answer_callback(cb_id, "✅ Mode DEMO dipilih")
+            # FIX: kirim pesan BARU dengan kb_main, tidak edit pesan foto
             await tg_send(
                 f"✅ Mode: 🎮 <b>DANA DEMO</b>\n"
-                f"Saldo fiktif: ${bal:.2f}\n\n"
-                "Klik ▶️ MULAI TES untuk mulai.", kb_main())
+                f"Saldo fiktif: <b>${bal:.2f}</b>\n\n"
+                "Pilih aksi:",
+                kb_main()
+            )
         return
 
     if data == "start":
         if not state.get("mode"):
-            await tg_answer_callback(cb_id, "Pilih mode dulu")
+            await tg_answer_callback(cb_id, "⚠️ Pilih mode dulu")
             await tg_send("⚠️ Pilih mode dulu:", kb_mode_select())
             return
         if state.get("mode") == "REAL":
@@ -429,10 +419,10 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
                 return
         state["active"] = True
         save_state(state)
-        await tg_answer_callback(cb_id, "Bot dimulai")
+        await tg_answer_callback(cb_id, "✅ Bot dimulai")
         await tg_send_photo(
-            "🤖 <b>BOT DIMULAI</b>\n"
-            "Scan & auto buy aktif.\n"
+            f"🤖 <b>BOT DIMULAI</b>\n"
+            f"Scan & auto buy aktif.\n"
             f"Mode: <b>{state['mode']}</b> | Min confidence: {MIN_CONFIDENCE}%"
         )
         return
@@ -440,27 +430,30 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
     if data == "stop":
         state["active"] = False
         save_state(state)
-        await tg_answer_callback(cb_id, "Bot dihentikan")
-        await tg_send("⏸️ <b>BOT DIHENTIKAN</b>\nPosisi tetap tersimpan.")
+        await tg_answer_callback(cb_id, "⏸️ Bot dihentikan")
+        await tg_send(
+            "⏸️ <b>BOT DIHENTIKAN</b>\nPosisi tetap tersimpan.",
+            kb_main()
+        )
         return
 
     if data == "status":
-        await tg_answer_callback(cb_id, "Status")
+        await tg_answer_callback(cb_id, "📊 Status")
         await tg_send_photo(await build_status_text())
         return
 
     if data == "pnl":
-        await tg_answer_callback(cb_id, "Laporan PnL")
+        await tg_answer_callback(cb_id, "📈 Laporan PnL")
         await tg_send_photo(await build_pnl_text())
         return
 
     if data == "history":
-        await tg_answer_callback(cb_id, "Riwayat posisi")
+        await tg_answer_callback(cb_id, "📜 Riwayat")
         await tg_send_photo(build_history_text())
         return
 
     if data == "export":
-        await tg_answer_callback(cb_id, "Membuat CSV...")
+        await tg_answer_callback(cb_id, "📥 Membuat CSV...")
         await export_csv()
         return
 
@@ -474,12 +467,15 @@ async def handle_callback(data: str, cb_id: str, message_id: int):
                 "realized_pnl": 0.0, "trades": 0, "losses": 0,
                 "start_balance_real": None,
             })
-            await tg_answer_callback(cb_id, "Reset selesai")
-            await tg_send(f"🔄 <b>RESET DEMO</b>\nSaldo kembali ${VIRTUAL_START_BALANCE:.2f}, "
-                          "semua posisi & riwayat dihapus.")
+            await tg_answer_callback(cb_id, "✅ Reset selesai")
+            await tg_send(
+                f"🔄 <b>RESET DEMO</b>\nSaldo kembali ${VIRTUAL_START_BALANCE:.2f}, "
+                "semua posisi & riwayat dihapus.",
+                kb_main()
+            )
         else:
-            await tg_answer_callback(cb_id, "Reset hanya untuk DEMO")
-            await tg_send("⚠️ Reset hanya tersedia di mode DEMO.")
+            await tg_answer_callback(cb_id, "⚠️ Reset hanya untuk DEMO")
+            await tg_send("⚠️ Reset hanya tersedia di mode DEMO.", kb_main())
         return
 
 
@@ -519,7 +515,9 @@ async def build_status_text() -> str:
                     sisa = f" ⏳{h}j{m}m"
             except Exception:
                 pass
-        lines.append(f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}")
+        lines.append(
+            f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}"
+        )
     return "\n".join(lines)
 
 
@@ -572,7 +570,9 @@ async def build_pnl_text() -> str:
                         sisa = f" ⏳{h}j{m}m"
                 except Exception:
                     pass
-            lines.append(f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}")
+            lines.append(
+                f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}"
+            )
 
     lines += [
         "",
@@ -647,7 +647,6 @@ async def export_csv():
 # ═══════════════════════════════════════════════════════════════
 
 async def telegram_poll_loop():
-    # Drop pending updates
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             await c.get(
@@ -659,13 +658,14 @@ async def telegram_poll_loop():
         logger.warning(f"⚠️ Drop updates error: {e}")
 
     offset      = 0
-    retry_delay = 1  # backoff untuk 429
+    retry_delay = 1
 
     while True:
         try:
             if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN.startswith("ISI_"):
                 await asyncio.sleep(30)
                 continue
+
             async with httpx.AsyncClient(timeout=35) as c:
                 r = await c.get(
                     f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
@@ -673,25 +673,23 @@ async def telegram_poll_loop():
                             "allowed_updates": json.dumps(["callback_query", "message"])},
                 )
 
-            # FIX: Handle 429 Too Many Requests dengan backoff
             if r.status_code == 429:
                 retry_after = int(r.headers.get("Retry-After", retry_delay))
                 logger.warning(f"⚠️ TG 429 rate limit — tunggu {retry_after}s")
                 await asyncio.sleep(retry_after)
                 retry_delay = min(retry_delay * 2, 60)
                 continue
-            retry_delay = 1  # reset backoff kalau sukses
 
-            # FIX: Handle 502 Bad Gateway
             if r.status_code in (502, 503, 504):
                 logger.warning(f"⚠️ TG gateway error {r.status_code} — tunggu 5s")
                 await asyncio.sleep(5)
                 continue
 
+            retry_delay = 1
             data = r.json()
 
             if not data.get("ok") and data.get("error_code") == 409:
-                logger.warning("⚠️ 409 Conflict: ada instance lain, tunggu 10 detik...")
+                logger.warning("⚠️ 409 Conflict: ada instance lain, tunggu 10s")
                 await asyncio.sleep(10)
                 continue
 
@@ -699,8 +697,9 @@ async def telegram_poll_loop():
                 offset = upd["update_id"] + 1
                 if "callback_query" in upd:
                     cb = upd["callback_query"]
-                    await handle_callback(cb["data"], cb["id"],
-                                          cb["message"]["message_id"])
+                    await handle_callback(
+                        cb["data"], cb["id"], cb["message"]["message_id"]
+                    )
                 elif "message" in upd:
                     txt = (upd["message"].get("text") or "").strip()
                     if txt == "/start":
@@ -847,8 +846,6 @@ async def get_market_status(market_id: str) -> dict | None:
         return None
 
 
-# ── Helper wallet ──────────────────────────────────────────────
-
 def get_usdc_balance() -> float:
     try:
         PUSD_CONTRACT = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
@@ -856,8 +853,8 @@ def get_usdc_balance() -> float:
         data   = "0x70a08231" + padded
         payload = {
             "jsonrpc": "2.0", "id": 1,
-            "method": "eth_call",
-            "params": [{"to": PUSD_CONTRACT, "data": data}, "latest"],
+            "method":  "eth_call",
+            "params":  [{"to": PUSD_CONTRACT, "data": data}, "latest"],
         }
         import httpx as _h
         rpc_list = [
@@ -901,107 +898,41 @@ def get_best_ask(token_id: str) -> float | None:
         return None
 
 
-# ══════════════════════════════════════════════════════════════
-#  FIX UTAMA: _post_order_direct — pakai client.post_order bawaan
-# ══════════════════════════════════════════════════════════════
-
-def _post_order_direct(signed_order, order_type: str = "FOK") -> dict:
-    """
-    FIX v0.34.6:
-    - Pakai client.post_order() langsung (sudah handle auth internally)
-    - Tidak perlu rebuild payload manual lagi
-    - Fallback ke HTTP manual kalau post_order tidak ada
-    """
-    try:
-        client = _get_clob_client()
-
-        # Cara 1: pakai method bawaan client (paling aman di v0.34.6)
-        if hasattr(client, "post_order"):
-            resp = client.post_order(signed_order, order_type)
-            logger.info(f"📋 post_order response: {resp}")
-            if isinstance(resp, dict):
-                err = resp.get("errorMsg") or resp.get("error")
-                if err:
-                    return {"success": False, "error": err}
-                return {
-                    "success":  True,
-                    "order":    resp,
-                    "tx_hash":  resp.get("transactionHash", ""),
-                }
-            return {"success": True, "order": resp, "tx_hash": ""}
-
-        # Cara 2: fallback HTTP manual dengan payload yang benar
-        vals = signed_order.order.dict()
-
-        # FIX: side harus integer (0=BUY, 1=SELL), bukan string
-        side_int = vals.get("side", 0)
-        if isinstance(side_int, str):
-            side_int = 0 if side_int.upper() == "BUY" else 1
-
-        order_payload = {
-            "salt":          str(vals["salt"]),
-            "maker":         vals["maker"],
-            "signer":        vals["signer"],
-            "taker":         vals["taker"],
-            "tokenId":       str(vals["tokenId"]),
-            "makerAmount":   str(vals["makerAmount"]),
-            "takerAmount":   str(vals["takerAmount"]),
-            "expiration":    str(vals["expiration"]),
-            "nonce":         str(vals["nonce"]),
-            "feeRateBps":    str(vals["feeRateBps"]),
-            "side":          side_int,           # FIX: integer bukan string
-            "signatureType": vals["signatureType"],
-        }
-        body_dict = {
-            "order":     order_payload,
-            "signature": signed_order.signature,
-            "orderType": order_type,
-            # FIX: owner = maker address, bukan funder address
-            "owner":     vals["maker"],
-        }
-        body = json.dumps(body_dict, separators=(',', ':'))
-
-        # Build auth headers pakai client internal signer
-        from py_clob_client.signing.hmac import create_level_2_headers
-        headers = create_level_2_headers(
-            signer=client.signer,
-            creds=client.creds,
-            method="POST",
-            request_path="/order",
-            body=body,
-        )
-        headers["Content-Type"] = "application/json"
-
-        import httpx as _h
-        r    = _h.post(f"{CLOB_API}/order", content=body.encode(), headers=headers, timeout=15)
-        data = r.json()
-        logger.info(f"📋 Order response ({r.status_code}): {data}")
-
-        if r.status_code != 200 or data.get("errorMsg") or data.get("error"):
-            err = data.get("errorMsg") or data.get("error") or str(data)
-            return {"success": False, "error": err}
-
-        return {"success": True, "order": data, "tx_hash": data.get("transactionHash", "")}
-
-    except Exception as e:
-        logger.error(f"❌ _post_order_direct error: {e}")
-        return {"success": False, "error": str(e)}
-
+# ═══════════════════════════════════════════════════════════════
+#  FIX ORDER: pakai post_order dengan OrderType enum
+# ═══════════════════════════════════════════════════════════════
 
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import BUY
+
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
             return {"success": False, "error": "Minimal $1 per order"}
+
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
         signed     = client.create_market_order(order_args)
-        return _post_order_direct(signed, "FOK")
+
+        # FIX: pakai post_order dengan OrderType.FOK (enum, bukan string)
+        resp = client.post_order(signed, OrderType.FOK)
+        logger.info(f"📋 buy post_order response: {resp}")
+
+        if isinstance(resp, dict):
+            err = resp.get("errorMsg") or resp.get("error")
+            if err:
+                return {"success": False, "error": err}
+            return {
+                "success":  True,
+                "order":    resp,
+                "tx_hash":  resp.get("transactionHash", ""),
+            }
+        return {"success": True, "order": str(resp), "tx_hash": ""}
+
     except Exception as e:
         logger.error(f"❌ buy_outcome error: {e}")
         return {"success": False, "error": str(e)}
@@ -1012,14 +943,31 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
+        from py_clob_client.clob_types import MarketOrderArgs, OrderType
         from py_clob_client.order_builder.constants import SELL
+
         if shares < 1.0:
             return {"success": False, "error": "Share terlalu kecil"}
+
         client     = _get_clob_client()
         order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
         signed     = client.create_market_order(order_args)
-        return _post_order_direct(signed, "FOK")
+
+        # FIX: pakai post_order dengan OrderType.FOK
+        resp = client.post_order(signed, OrderType.FOK)
+        logger.info(f"📋 sell post_order response: {resp}")
+
+        if isinstance(resp, dict):
+            err = resp.get("errorMsg") or resp.get("error")
+            if err:
+                return {"success": False, "error": err}
+            return {
+                "success":  True,
+                "order":    resp,
+                "tx_hash":  resp.get("transactionHash", ""),
+            }
+        return {"success": True, "order": str(resp), "tx_hash": ""}
+
     except Exception as e:
         logger.error(f"❌ sell_outcome error: {e}")
         return {"success": False, "error": str(e)}
@@ -1046,7 +994,7 @@ def _polygonscan_link(tx_hash: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  NEWS + GROQ ANALYZER
+#  FIX GROQ: prompt lebih tegas + regex robust
 # ═══════════════════════════════════════════════════════════════
 
 async def get_news(query: str, max_items: int = 4) -> str:
@@ -1068,33 +1016,42 @@ async def get_news(query: str, max_items: int = 4) -> str:
 
 async def analyze_market(market: dict) -> dict:
     news   = await get_news(market["question"])
-    prompt = f"""Kamu adalah analis prediction market profesional.
+    prompt = f"""Kamu adalah analis prediction market sports profesional.
 
 PERTANYAAN: {market['question']}
 BERAKHIR: {market.get('end_date') or '?'}
 HARGA YES: {market['yes_price']:.2%} | HARGA NO: {market['no_price']:.2%}
 
-BERITA:
+BERITA TERKINI:
 {news}
 
-Jawab HANYA dengan JSON valid satu baris tanpa teks lain, tanpa markdown, tanpa backtick:
-{{"signal":"BUY_YES","confidence":80,"recommended_outcome":"YES","reasoning":"alasan singkat"}}"""
+ATURAN WAJIB:
+1. Jika ada bukti kuat (berita/statistik) dukung YES → signal BUY_YES, confidence 70-90
+2. Jika tidak ada bukti kuat → signal SKIP, confidence 0
+3. JANGAN pernah beri confidence 50-59, itu zona abu-abu — pilih SKIP atau minimal 65
+4. Confidence hanya boleh: 0 (SKIP), 65, 70, 75, 80, 85, 90
+
+Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick, tanpa spasi ekstra:
+{{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 10 kata"}}"""
+
     try:
         async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.post("https://api.groq.com/openai/v1/chat/completions",
-                             headers={"Authorization": f"Bearer {GROQ_API_KEY}",
-                                      "Content-Type": "application/json"},
-                             json={"model": GROQ_MODEL,
-                                   "messages": [{"role": "user", "content": prompt}],
-                                   "temperature": 0.1,
-                                   "max_tokens":  200})
+            r = await c.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}",
+                         "Content-Type": "application/json"},
+                json={
+                    "model":       GROQ_MODEL,
+                    "messages":    [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens":  120,
+                }
+            )
             r.raise_for_status()
             raw = r.json()["choices"][0]["message"]["content"].strip()
 
-        # FIX: regex lebih robust — handle newline dan thinking tags
-        # Hapus thinking tags dulu kalau ada
+        # FIX: hapus thinking tags, lalu cari JSON
         raw = re.sub(r'<think>.*?</think>', '', raw, flags=re.DOTALL).strip()
-        # Cari JSON dengan regex yang handle multiline
         json_match = re.search(r'\{.*?\}', raw, re.DOTALL)
         if not json_match:
             logger.warning(f"⚠️ Groq no JSON: {raw[:100]}")
@@ -1104,12 +1061,21 @@ Jawab HANYA dengan JSON valid satu baris tanpa teks lain, tanpa markdown, tanpa 
         result  = json.loads(json_match.group())
         outcome = result.get("recommended_outcome", "SKIP")
         conf    = int(result.get("confidence", 0) or 0)
+
+        # FIX: paksa SKIP kalau confidence di zona abu-abu 50-59
+        if conf < MIN_CONFIDENCE:
+            outcome = "SKIP"
+            result["signal"] = "SKIP"
+
         logger.info(f"🧠 Groq: {outcome} | conf={conf}% | {result.get('reasoning','')[:60]}")
 
         result["recommended_token"] = (
             market["token_yes"] if outcome == "YES"
-            else market["token_no"] if outcome == "NO" else None)
+            else market["token_no"] if outcome == "NO"
+            else None
+        )
         return result
+
     except Exception as e:
         logger.error(f"❌ Groq error: {e}")
         return {"signal": "SKIP", "confidence": 0,
@@ -1178,8 +1144,10 @@ async def manage_open_positions() -> int:
                             f"{pos['question'][:80]}\n+${gain:.2f}{tx_link}"
                         )
                     else:
-                        await tg_send(f"❌ Claim gagal: {res.get('error')}\n"
-                                      f"Claim manual: {pos['question'][:80]}")
+                        await tg_send(
+                            f"❌ Claim gagal: {res.get('error')}\n"
+                            f"Claim manual: {pos['question'][:80]}"
+                        )
             else:
                 close_position(market_id, realized_pnl=-pos["cost_usd"],
                                exit_price=0.0, reason="KALAH")
@@ -1189,7 +1157,6 @@ async def manage_open_positions() -> int:
                 )
             continue
 
-        # Exit atas 0.99
         bid = get_best_bid(token_id)
         if bid is not None and bid >= EXIT_UPPER:
             shares = float(pos["shares"])
