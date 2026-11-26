@@ -62,13 +62,13 @@ MAX_ODDS = 0.60
 MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
-SCAN_INTERVAL_MENIT = 5
+SCAN_INTERVAL_MENIT = 15
 MIN_USDC_BALANCE    = 5.0
 
 # ── Risk management ────────────────────────────────────────────
-MAX_OPEN_POSITIONS     = 5
+MAX_OPEN_POSITIONS     = 3
 ENABLE_SELL            = True
-MAX_DAILY_LOSSES       = 4
+MAX_DAILY_LOSSES       = 3
 ALERT_BALANCE_DROP_PCT = 20
 
 # ── Saldo fiktif ───────────────────────────────────────────────
@@ -308,7 +308,7 @@ async def tg_send(text: str, keyboard: list = None) -> bool:
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text,
                "parse_mode": "HTML", "disable_web_page_preview": True}
     if keyboard:
-        payload["reply_markup"] = {"inline_keyboard": keyboard}
+        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     r = await tg_api("sendMessage", payload)
     return bool(r.get("ok"))
 
@@ -334,7 +334,7 @@ async def tg_edit(message_id: int, text: str, keyboard: list = None):
     payload = {"chat_id": TELEGRAM_CHAT_ID, "message_id": message_id,
                "text": text, "parse_mode": "HTML"}
     if keyboard:
-        payload["reply_markup"] = {"inline_keyboard": keyboard}
+        payload["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
     await tg_api("editMessageText", payload)
 
 
@@ -899,30 +899,25 @@ def _post_order_direct(signed_order, order_type: str = "FOK") -> dict:
                 "expiration":    str(vals["expiration"]),
                 "nonce":         str(vals["nonce"]),
                 "feeRateBps":    str(vals["feeRateBps"]),
-                "side":          str(vals["side"]),
-                "signatureType": str(vals["signatureType"]),
+                "side":          "BUY" if vals["side"] == 0 else "SELL",
+                "signatureType": vals["signatureType"],
             },
             "signature":  signed_order.signature,
             "orderType":  order_type,
+            "owner":      POLYMARKET_FUNDER_ADDRESS,
         }
-        # Ambil API credentials
-        import time, hmac, hashlib, base64
-        client = _get_clob_client()
-        creds  = client.create_or_derive_api_creds()
-        ts     = str(int(time.time()))
-        msg    = ts + "POST" + "/order" + json.dumps(payload, separators=(',', ':'))
-        sig    = base64.b64encode(
-            hmac.new(creds.api_secret.encode(), msg.encode(), hashlib.sha256).digest()
-        ).decode()
-        headers = {
-            "Content-Type":   "application/json",
-            "POLY_ADDRESS":   POLYMARKET_FUNDER_ADDRESS,
-            "POLY_SIGNATURE": sig,
-            "POLY_TIMESTAMP": ts,
-            "POLY_API_KEY":   creds.api_key,
-            "POLY_PASSPHRASE": creds.api_passphrase,
-        }
-        r = _h.post(f"{CLOB_API}/order", json=payload, headers=headers, timeout=15)
+        # Ambil API credentials pakai create_level_2_headers
+        from py_clob_client.headers.headers import create_level_2_headers, RequestArgs
+        client  = _get_clob_client()
+        creds   = client.create_or_derive_api_creds()
+        body    = json.dumps(payload, separators=(',', ':'))
+        headers = create_level_2_headers(
+            signer=client.signer,
+            creds=creds,
+            request_args=RequestArgs(method='POST', request_path='/order', body=body)
+        )
+        headers["Content-Type"] = "application/json"
+        r = _h.post(f"{CLOB_API}/order", content=body.encode(), headers=headers, timeout=15)
         data = r.json()
         logger.info(f"📋 Order response ({r.status_code}): {data}")
         if r.status_code != 200 or data.get("errorMsg"):
