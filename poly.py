@@ -720,18 +720,14 @@ async def telegram_poll_loop():
 #  POLYMARKET CLIENT
 # ═══════════════════════════════════════════════════════════════
 
-def _get_clob_client():
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    client = ClobClient(
-        host=CLOB_API,
-        key=POLYMARKET_WALLET_KEY,
-        chain_id=POLYGON,
-        signature_type=1,
-        funder=POLYMARKET_FUNDER_ADDRESS or None,
+def _get_poly_client():
+    """Buat client SDK baru polymarket."""
+    from polymarket import SecureClient, PRODUCTION
+    return SecureClient.create(
+        private_key=POLYMARKET_WALLET_KEY,
+        wallet=POLYMARKET_FUNDER_ADDRESS or None,
+        environment=PRODUCTION,
     )
-    client.set_api_creds(client.create_or_derive_api_creds())
-    return client
 
 
 async def validate_wallet() -> tuple[bool, str]:
@@ -899,7 +895,7 @@ def get_best_ask(token_id: str) -> float | None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FIX ORDER: pakai post_order dengan OrderType enum
+#  ORDER: pakai SDK baru polymarket
 # ═══════════════════════════════════════════════════════════════
 
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
@@ -907,57 +903,23 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
-        from py_clob_client.order_builder.constants import BUY
-        from py_clob_client.headers.headers import create_level_2_headers, RequestArgs
-        import httpx as _h
-
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
             return {"success": False, "error": "Minimal $1 per order"}
 
-        client     = _get_clob_client()
-        creds      = client.create_or_derive_api_creds()
-        order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
-        signed     = client.create_market_order(order_args)
-
-        # Build payload dari signed order
-        vals = signed.order.values
-        payload = {
-            "order": {
-                "salt":          str(vals["salt"]),
-                "maker":         vals["maker"],
-                "signer":        vals["signer"],
-                "taker":         vals["taker"],
-                "tokenId":       str(vals["tokenId"]),
-                "makerAmount":   str(vals["makerAmount"]),
-                "takerAmount":   str(vals["takerAmount"]),
-                "expiration":    str(vals["expiration"]),
-                "nonce":         str(vals["nonce"]),
-                "feeRateBps":    str(vals["feeRateBps"]),
-                "side":          "BUY" if vals["side"] == 0 else "SELL",
-                "signatureType": vals["signatureType"],
-            },
-            "signature": signed.signature,
-            "orderType": "FOK",
-        }
-
-        body    = json.dumps(payload, separators=(',', ':'))
-        headers = create_level_2_headers(
-            signer=client.signer,
-            creds=creds,
-            request_args=RequestArgs(method='POST', request_path='/order', body=body)
+        client = _get_poly_client()
+        result = client.place_market_order(
+            token_id=token_id,
+            side="BUY",
+            amount=amount_usd,
+            order_type="FOK",
         )
-        headers["Content-Type"] = "application/json"
+        logger.info(f"📋 buy response: {result}")
 
-        r = _h.post(f"{CLOB_API}/order", content=body.encode(), headers=headers, timeout=15)
-        resp = r.json() if r.text else {}
-        logger.info(f"📋 buy response ({r.status_code}): {resp}")
-
-        if r.status_code in (200, 201):
-            return {"success": True, "order": resp,
-                    "tx_hash": resp.get("transactionHash", "")}
-        return {"success": False, "error": resp.get("error", f"HTTP {r.status_code}")}
+        if result.ok:
+            tx = result.transactions_hashes[0] if result.transactions_hashes else ""
+            return {"success": True, "order": result, "tx_hash": tx}
+        return {"success": False, "error": str(result)}
 
     except Exception as e:
         logger.error(f"❌ buy_outcome error: {e}")
@@ -969,55 +931,22 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs
-        from py_clob_client.order_builder.constants import SELL
-        from py_clob_client.headers.headers import create_level_2_headers, RequestArgs
-        import httpx as _h
-
         if shares < 1.0:
             return {"success": False, "error": "Share terlalu kecil"}
 
-        client     = _get_clob_client()
-        creds      = client.create_or_derive_api_creds()
-        order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
-        signed     = client.create_market_order(order_args)
-
-        vals = signed.order.values
-        payload = {
-            "order": {
-                "salt":          str(vals["salt"]),
-                "maker":         vals["maker"],
-                "signer":        vals["signer"],
-                "taker":         vals["taker"],
-                "tokenId":       str(vals["tokenId"]),
-                "makerAmount":   str(vals["makerAmount"]),
-                "takerAmount":   str(vals["takerAmount"]),
-                "expiration":    str(vals["expiration"]),
-                "nonce":         str(vals["nonce"]),
-                "feeRateBps":    str(vals["feeRateBps"]),
-                "side":          "BUY" if vals["side"] == 0 else "SELL",
-                "signatureType": vals["signatureType"],
-            },
-            "signature": signed.signature,
-            "orderType": "FOK",
-        }
-
-        body    = json.dumps(payload, separators=(',', ':'))
-        headers = create_level_2_headers(
-            signer=client.signer,
-            creds=creds,
-            request_args=RequestArgs(method='POST', request_path='/order', body=body)
+        client = _get_poly_client()
+        result = client.place_market_order(
+            token_id=token_id,
+            side="SELL",
+            shares=round(shares, 4),
+            order_type="FOK",
         )
-        headers["Content-Type"] = "application/json"
+        logger.info(f"📋 sell response: {result}")
 
-        r = _h.post(f"{CLOB_API}/order", content=body.encode(), headers=headers, timeout=15)
-        resp = r.json() if r.text else {}
-        logger.info(f"📋 sell response ({r.status_code}): {resp}")
-
-        if r.status_code in (200, 201):
-            return {"success": True, "order": resp,
-                    "tx_hash": resp.get("transactionHash", "")}
-        return {"success": False, "error": resp.get("error", f"HTTP {r.status_code}")}
+        if result.ok:
+            tx = result.transactions_hashes[0] if result.transactions_hashes else ""
+            return {"success": True, "order": result, "tx_hash": tx}
+        return {"success": False, "error": str(result)}
 
     except Exception as e:
         logger.error(f"❌ sell_outcome error: {e}")
@@ -1028,19 +957,22 @@ def redeem_position(market_id: str, condition_id: str) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True, "note": "DEMO: claim disimulasikan"}
     try:
-        client = _get_clob_client()
-        if hasattr(client, "redeem"):
-            resp    = client.redeem(condition_id=condition_id)
-            tx_hash = resp.get("transactionHash", "") if isinstance(resp, dict) else ""
-            return {"success": True, "resp": resp, "tx_hash": tx_hash}
-        return {"success": False, "error": "client.redeem tidak tersedia"}
+        from polymarket.models import ConditionId
+        client = _get_poly_client()
+        result = client.redeem_positions(condition_id=ConditionId(condition_id))
+        logger.info(f"📋 redeem response: {result}")
+        tx = result.transactions_hashes[0] if hasattr(result, "transactions_hashes") and result.transactions_hashes else ""
+        return {"success": True, "resp": result, "tx_hash": tx}
     except Exception as e:
+        logger.error(f"❌ redeem error: {e}")
         return {"success": False, "error": str(e)}
 
 
-def _polygonscan_link(tx_hash: str) -> str:
+def _polygonscan_link(tx_hash) -> str:
     if tx_hash:
-        return f"\n🔗 <a href='{POLYGONSCAN_TX}{tx_hash}'>Lihat di Polygonscan</a>"
+        h = str(tx_hash)
+        if h and h != "None":
+            return f"\n🔗 <a href='{POLYGONSCAN_TX}{h}'>Lihat di Polygonscan</a>"
     return ""
 
 
