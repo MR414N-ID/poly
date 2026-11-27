@@ -31,6 +31,9 @@ GROQ_API_KEY              = os.getenv("GROQ_API_KEY", "")
 GROQ_MODEL                = "qwen/qwen3.8-27b"
 POLYMARKET_WALLET_KEY     = os.getenv("POLYMARKET_WALLET_KEY", "")
 POLYMARKET_FUNDER_ADDRESS = os.getenv("POLYMARKET_FUNDER_ADDRESS", "")
+POLYMARKET_RELAYER_API_KEY         = os.getenv("POLYMARKET_RELAYER_API_KEY") or ""
+POLYMARKET_RELAYER_API_KEY_ADDRESS = os.getenv("POLYMARKET_RELAYER_API_KEY_ADDRESS") or ""
+CLAIM_NOTIFY_EVERY_HOURS = 6   # ulangi notif "claim gagal" paling cepat tiap 6 jam
 
 BOT_IMAGE_URL = "https://i.ibb.co/KpS4ZD3R/file-0000000096888211b59a5bc34420ef0c.png"
 
@@ -41,15 +44,53 @@ FALLBACK_2_HOURS = 20
 TOP_MARKETS      = 10
 
 SPORTS_KEYWORDS = [
-    "win", "beat", "defeat", "match", "game", "final", "championship",
-    "league", "cup", "tournament", "nfl", "nba", "nhl", "mlb", "mls",
-    "soccer", "football", "basketball", "baseball", "hockey", "tennis",
-    "ufc", "mma", "boxing", "golf", "f1", "formula", "race", "grand prix",
-    "premier league", "la liga", "serie a", "bundesliga", "champions league",
-    "world cup", "playoffs", "superbowl", "super bowl", "nascar",
-    "score", "goal", "point", "quarter", "half", "overtime",
-    "leading", "halftime", "both teams", "first half", "second half",
+    # Olahraga tanpa draw (aman)
+    "nfl", "nba", "nhl", "mlb",
+    "basketball", "baseball", "hockey", "tennis",
+    "ufc", "mma", "boxing",
+    "playoffs", "superbowl", "super bowl",
+    "championship", "final",
+    # Esports / Gaming — mobile
+    "mobile legends", "mlbb", "pubg mobile", "free fire", "freefire",
+    "clash royale", "clash of clans", "honor of kings", "arena of valor",
+    # Esports / Gaming — PC
+    "valorant", "dota 2", "dota2", "cs2", "csgo", "counter-strike",
+    "league of legends", "lol", "overwatch", "apex legends",
+    "rainbow six", "rocket league", "starcraft", "fortnite", "pubg pc",
+    # Esports / Gaming — console
+    "nba 2k", "madden", "efootball",
+    # Esports general
+    "esports", "esport", "gaming tournament",
+    "grand final", "major tournament", "lan event",
 ]
+
+# ── Keyword yang DILARANG di question ─────────────────────────
+SKIP_MARKET_KEYWORDS = [
+    # Sepak bola
+    "soccer", "football", "premier league", "la liga", "serie a",
+    "bundesliga", "champions league", "world cup", "mls", "ligue 1",
+    "goal", "goals", "offsides",
+    # F1 / Motorsport
+    "f1", "formula 1", "formula one", "fastest lap", "grand prix",
+    "qualifying", "pole position", "podium", "nascar", "race",
+    # Golf
+    "golf", "pga", "masters",
+    # Sub-market / pilihan ganda
+    "map 1", "map 2", "map 3", "map 4", "map 5",
+    "first half", "second half", "halftime", "1h ", "2h ",
+    "first blood", "most kills", "first tower", "first baron",
+    "first dragon", "ace", "pentakill",
+    "both teams to score", "both teams",
+    "leading at half", "leading at quarter",
+    "score first", "first goal",
+    "over/under", "o/u", "total corners", "total rounds",
+    "draw", "tie", "seri", "imbang", "drawn",
+    "win map", "win round", "win half",
+    "practice", "qualify",
+]
+
+# ── Max spread ─────────────────────────────────────────────────
+MAX_SPREAD_PCT = 5.0  # skip kalau spread > 5%
 
 MIN_ODDS = 0.40
 MAX_ODDS = 0.60
@@ -264,8 +305,22 @@ def daily_loss_exceeded() -> bool:
     return stats.get("losses", 0) >= MAX_DAILY_LOSSES
 
 
+def active_positions() -> dict:
+    """Posisi yang masih berjalan (BELUM menang/menunggu claim)."""
+    return {k: v for k, v in load_positions().items()
+            if v.get("status") != "PENDING_CLAIM"}
+
+
+def update_position(market_id: str, **fields):
+    pos = load_positions()
+    if market_id in pos:
+        pos[market_id].update(fields)
+        save_positions(pos)
+
+
 def can_open_new_position() -> bool:
-    return len(load_positions()) < MAX_OPEN_POSITIONS
+    # Posisi yang sudah menang & tinggal claim TIDAK memakai jatah slot
+    return len(active_positions()) < MAX_OPEN_POSITIONS
 
 
 def is_demo() -> bool:
@@ -492,7 +547,8 @@ async def build_status_text() -> str:
     lines = [
         "📊 <b>STATUS BOT</b>",
         f"Mode: <b>{mode}</b> | {active}",
-        f"Posisi terbuka: {len(positions)}/{MAX_OPEN_POSITIONS}",
+        f"Posisi terbuka: {len(active_positions())}/{MAX_OPEN_POSITIONS}"
+        f" | Menunggu claim: {len(positions) - len(active_positions())}",
         f"Total trade: {len(history)}",
         f"Kalah hari ini: {daily.get('losses', 0)}/{MAX_DAILY_LOSSES}",
     ]
@@ -515,8 +571,9 @@ async def build_status_text() -> str:
                     sisa = f" ⏳{h}j{m}m"
             except Exception:
                 pass
+        tag = " 🏆 MENANG, tunggu claim" if p.get("status") == "PENDING_CLAIM" else ""
         lines.append(
-            f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}"
+            f"• {p['question'][:50]} — {p['outcome']} @ {p['entry_price']:.2f}{sisa}{tag}"
         )
     return "\n".join(lines)
 
@@ -720,18 +777,21 @@ async def telegram_poll_loop():
 #  POLYMARKET CLIENT
 # ═══════════════════════════════════════════════════════════════
 
-def _get_clob_client():
-    from py_clob_client.client import ClobClient
-    from py_clob_client.constants import POLYGON
-    client = ClobClient(
-        host=CLOB_API,
-        key=POLYMARKET_WALLET_KEY,
-        chain_id=POLYGON,
-        signature_type=1,
-        funder=POLYMARKET_FUNDER_ADDRESS or None,
+def _get_poly_client():
+    """Buat client SDK baru polymarket."""
+    from polymarket import SecureClient, PRODUCTION
+    kwargs = dict(
+        private_key=POLYMARKET_WALLET_KEY,
+        wallet=POLYMARKET_FUNDER_ADDRESS or None,
+        environment=PRODUCTION,
     )
-    client.set_api_creds(client.create_or_derive_api_creds())
-    return client
+    if POLYMARKET_RELAYER_API_KEY and POLYMARKET_RELAYER_API_KEY_ADDRESS:
+        from polymarket import RelayerApiKey
+        kwargs["api_key"] = RelayerApiKey(
+            key=POLYMARKET_RELAYER_API_KEY,
+            address=POLYMARKET_RELAYER_API_KEY_ADDRESS,
+        )
+    return SecureClient.create(**kwargs)
 
 
 async def validate_wallet() -> tuple[bool, str]:
@@ -783,8 +843,15 @@ def _parse_market(m: dict) -> dict | None:
     try:
         raw    = m.get("outcomePrices", "[]")
         prices = json.loads(raw) if isinstance(raw, str) else raw
-        if not prices or len(prices) < 2:
+        # Hanya ambil market binary (2 pilihan YES/NO) — hapus yang 3+ pilihan
+        if not prices or len(prices) != 2:
             return None
+
+        # Hapus market yang mengandung keyword terlarang
+        question = m.get("question", "").lower()
+        if any(kw in question for kw in SKIP_MARKET_KEYWORDS):
+            return None
+
         yes = float(prices[0])
         if not (MIN_ODDS <= yes <= MAX_ODDS):
             return None
@@ -899,7 +966,7 @@ def get_best_ask(token_id: str) -> float | None:
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FIX ORDER: pakai post_order dengan OrderType enum
+#  ORDER: pakai SDK baru polymarket
 # ═══════════════════════════════════════════════════════════════
 
 def buy_outcome(token_id: str, amount_usd: float) -> dict:
@@ -907,35 +974,48 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: beli ${amount_usd:.2f}"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import BUY
-
         amount_usd = round(amount_usd, 2)
         if amount_usd < 1.0:
             return {"success": False, "error": "Minimal $1 per order"}
 
-        client     = _get_clob_client()
-        order_args = MarketOrderArgs(token_id=token_id, amount=amount_usd, side=BUY)
-        signed     = client.create_market_order(order_args)
+        # Cek spread dulu sebelum beli
+        import httpx as _h
+        r = _h.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "BUY"}, timeout=10)
+        ask = float(r.json().get("price", 0)) if r.status_code == 200 else 0
+        r2  = _h.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "SELL"}, timeout=10)
+        bid = float(r2.json().get("price", 0)) if r2.status_code == 200 else 0
 
-        # FIX: pakai post_order dengan OrderType.FOK (enum, bukan string)
-        resp = client.post_order(signed, OrderType.FOK)
-        logger.info(f"📋 buy post_order response: {resp}")
+        if ask > 0 and bid > 0:
+            spread_pct = (ask - bid) / ask * 100
+            if spread_pct > MAX_SPREAD_PCT:
+                logger.info(f"⏭️ Skip spread terlalu besar: {spread_pct:.1f}% > {MAX_SPREAD_PCT}%")
+                return {"success": False, "error": f"Spread {spread_pct:.1f}% terlalu besar"}
 
-        if isinstance(resp, dict):
-            err = resp.get("errorMsg") or resp.get("error")
-            if err:
-                return {"success": False, "error": err}
-            return {
-                "success":  True,
-                "order":    resp,
-                "tx_hash":  resp.get("transactionHash", ""),
-            }
-        return {"success": True, "order": str(resp), "tx_hash": ""}
+        client = _get_poly_client()
+        result = client.place_market_order(
+            token_id=token_id,
+            side="BUY",
+            amount=amount_usd,
+            order_type="FOK",
+        )
+        logger.info(f"📋 buy response: {result}")
+
+        # Cek making_amount > 0 — kalau 0 artinya tidak ada likuiditas
+        if result.ok:
+            if hasattr(result, "making_amount") and float(result.making_amount) == 0:
+                logger.warning(f"⚠️ Order delayed/no fill — making_amount=0, skip catat posisi")
+                return {"success": False, "error": "Order tidak terisi (no fill)"}
+            tx = result.transactions_hashes[0] if result.transactions_hashes else ""
+            return {"success": True, "order": result, "tx_hash": tx}
+        return {"success": False, "error": str(result)}
 
     except Exception as e:
-        logger.error(f"❌ buy_outcome error: {e}")
-        return {"success": False, "error": str(e)}
+        err = str(e)
+        if "liquidity" in err.lower():
+            logger.info(f"⏭️ Skip no liquidity: {token_id[:20]}...")
+        else:
+            logger.error(f"❌ buy_outcome error: {e}")
+        return {"success": False, "error": err}
 
 
 def sell_outcome(token_id: str, shares: float) -> dict:
@@ -943,53 +1023,64 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        from py_clob_client.clob_types import MarketOrderArgs, OrderType
-        from py_clob_client.order_builder.constants import SELL
+        if shares <= 0:
+            return {"success": False, "error": "Shares tidak valid"}
 
-        if shares < 1.0:
-            return {"success": False, "error": "Share terlalu kecil"}
+        client = _get_poly_client()
+        # SDK baru: pakai shares parameter (jumlah kontrak yang dipegang)
+        result = client.place_market_order(
+            token_id=token_id,
+            side="SELL",
+            shares=round(shares, 2),
+            order_type="FOK",
+        )
+        logger.info(f"📋 sell response: {result}")
 
-        client     = _get_clob_client()
-        order_args = MarketOrderArgs(token_id=token_id, amount=round(shares, 4), side=SELL)
-        signed     = client.create_market_order(order_args)
-
-        # FIX: pakai post_order dengan OrderType.FOK
-        resp = client.post_order(signed, OrderType.FOK)
-        logger.info(f"📋 sell post_order response: {resp}")
-
-        if isinstance(resp, dict):
-            err = resp.get("errorMsg") or resp.get("error")
-            if err:
-                return {"success": False, "error": err}
-            return {
-                "success":  True,
-                "order":    resp,
-                "tx_hash":  resp.get("transactionHash", ""),
-            }
-        return {"success": True, "order": str(resp), "tx_hash": ""}
+        if result.ok:
+            tx = result.transactions_hashes[0] if result.transactions_hashes else ""
+            return {"success": True, "order": result, "tx_hash": tx}
+        return {"success": False, "error": str(result)}
 
     except Exception as e:
-        logger.error(f"❌ sell_outcome error: {e}")
-        return {"success": False, "error": str(e)}
+        err = str(e)
+        if "liquidity" in err.lower():
+            logger.info(f"⏭️ Sell skip — no liquidity, tunggu market resolve")
+        else:
+            logger.error(f"❌ sell_outcome error: {e}")
+        return {"success": False, "error": err}
 
 
 def redeem_position(market_id: str, condition_id: str) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True, "note": "DEMO: claim disimulasikan"}
+    if not condition_id:
+        return {"success": False, "error": "conditionId kosong"}
+    if not (POLYMARKET_RELAYER_API_KEY and POLYMARKET_RELAYER_API_KEY_ADDRESS):
+        return {"success": False,
+                "error": "POLYMARKET_RELAYER_API_KEY / _ADDRESS belum diisi di .env"}
     try:
-        client = _get_clob_client()
-        if hasattr(client, "redeem"):
-            resp    = client.redeem(condition_id=condition_id)
-            tx_hash = resp.get("transactionHash", "") if isinstance(resp, dict) else ""
-            return {"success": True, "resp": resp, "tx_hash": tx_hash}
-        return {"success": False, "error": "client.redeem tidak tersedia"}
+        from polymarket.models import ConditionId
+        client = _get_poly_client()
+        handle = client.redeem_positions(condition_id=ConditionId(condition_id))
+        logger.info(f"📋 redeem response: {handle}")
+        tx = ""
+        try:
+            outcome = handle.wait()          # tunggu tx settle
+            tx = str(getattr(outcome, "transaction_hash", "") or "")
+        except AttributeError:
+            hashes = getattr(handle, "transactions_hashes", None)
+            tx = hashes[0] if hashes else ""
+        return {"success": True, "resp": handle, "tx_hash": tx}
     except Exception as e:
+        logger.error(f"❌ redeem error: {e}")
         return {"success": False, "error": str(e)}
 
 
-def _polygonscan_link(tx_hash: str) -> str:
+def _polygonscan_link(tx_hash) -> str:
     if tx_hash:
-        return f"\n🔗 <a href='{POLYGONSCAN_TX}{tx_hash}'>Lihat di Polygonscan</a>"
+        h = str(tx_hash)
+        if h and h != "None":
+            return f"\n🔗 <a href='{POLYGONSCAN_TX}{h}'>Lihat di Polygonscan</a>"
     return ""
 
 
@@ -1022,17 +1113,20 @@ PERTANYAAN: {market['question']}
 BERAKHIR: {market.get('end_date') or '?'}
 HARGA YES: {market['yes_price']:.2%} | HARGA NO: {market['no_price']:.2%}
 
-BERITA TERKINI:
+BERITA (bisa kosong):
 {news}
 
-ATURAN WAJIB:
-1. Jika ada bukti kuat (berita/statistik) dukung YES → signal BUY_YES, confidence 70-90
-2. Jika tidak ada bukti kuat → signal SKIP, confidence 0
-3. JANGAN pernah beri confidence 50-59, itu zona abu-abu — pilih SKIP atau minimal 65
-4. Confidence hanya boleh: 0 (SKIP), 65, 70, 75, 80, 85, 90
+CARA ANALISIS:
+1. Analisis KONTEKS pertanyaan — siapa yang lebih mungkin menang/terjadi berdasarkan pengetahuan tim, pemain, liga
+2. Harga pasar adalah PETUNJUK saja, bukan penentu utama — cari value bet (beli yang underpriced)
+3. Contoh: Cruz Azul tim kuat main kandang → pilih YES meski YES hanya 44¢
+4. Contoh: Pemain biasa diminta cetak 3 gol → pilih NO meski NO sudah 80¢
+5. Berita hanya bonus — kalau tidak ada berita, analisis dari nama tim/pemain/konteks
+6. Pilih outcome yang PALING MUNGKIN terjadi, bukan yang harganya paling tinggi
+7. SKIP hanya kalau benar-benar tidak bisa diprediksi (50/50 murni tanpa info apapun)
 
-Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick, tanpa spasi ekstra:
-{{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 10 kata"}}"""
+Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick:
+{{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 8 kata"}}"""
 
     try:
         async with httpx.AsyncClient(timeout=30) as c:
@@ -1044,7 +1138,7 @@ Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick, tanpa spasi 
                     "model":       GROQ_MODEL,
                     "messages":    [{"role": "user", "content": prompt}],
                     "temperature": 0.1,
-                    "max_tokens":  120,
+                    "max_tokens":  200,
                 }
             )
             r.raise_for_status()
@@ -1101,7 +1195,9 @@ async def manage_open_positions() -> int:
         status          = await get_market_status(market_id)
         resolved        = False
         winning_outcome = None
+        condition_id    = pos.get("condition_id", "")
         if status:
+            condition_id = status.get("conditionId", "") or condition_id
             closed = status.get("closed") or status.get("umaResolutionStatus") == "resolved"
             if closed:
                 raw_prices = status.get("outcomePrices", "[]")
@@ -1114,7 +1210,9 @@ async def manage_open_positions() -> int:
                     winning_outcome = "YES"
                 elif final_yes <= 0.01:
                     winning_outcome = "NO"
-                resolved = True
+                # Hanya anggap selesai kalau hasil sudah jelas (hindari salah KALAH
+                # saat market closed tapi belum resolve final)
+                resolved = winning_outcome is not None
 
         if resolved:
             won    = (winning_outcome == pos["outcome"])
@@ -1132,22 +1230,42 @@ async def manage_open_positions() -> int:
                         f"+${gain:.2f} → saldo ${bal:.2f}"
                     )
                 else:
-                    res = redeem_position(market_id, status.get("conditionId", ""))
+                    # 1) auto-claim (redeem gasless via Relayer key)
+                    res = redeem_position(market_id, condition_id)
+                    via = "CLAIM"
+                    exit_px = 1.0
                     if res.get("success"):
-                        gain    = shares * 1.0
+                        gain    = shares * exit_px
                         tx_link = _polygonscan_link(res.get("tx_hash", ""))
                         close_position(market_id, realized_pnl=gain - pos["cost_usd"],
-                                       exit_price=1.0, reason="MENANG")
+                                       exit_price=exit_px, reason="MENANG")
                         sold += 1
                         await tg_send_photo(
-                            f"🎉 <b>CLAIM BERHASIL</b>\n"
+                            f"🎉 <b>{via} BERHASIL</b>\n"
                             f"{pos['question'][:80]}\n+${gain:.2f}{tx_link}"
                         )
                     else:
-                        await tg_send(
-                            f"❌ Claim gagal: {res.get('error')}\n"
-                            f"Claim manual: {pos['question'][:80]}"
-                        )
+                        # Tandai MENUNGGU CLAIM: slot dibebaskan, dicoba lagi tiap siklus
+                        first_time = pos.get("status") != "PENDING_CLAIM"
+                        last_note  = pos.get("claim_notified_at")
+                        need_note  = first_time
+                        if not first_time and last_note:
+                            try:
+                                age = datetime.now(timezone.utc) - datetime.fromisoformat(last_note)
+                                need_note = age >= timedelta(hours=CLAIM_NOTIFY_EVERY_HOURS)
+                            except Exception:
+                                need_note = True
+                        fields = {"status": "PENDING_CLAIM", "condition_id": condition_id}
+                        if need_note:
+                            fields["claim_notified_at"] = datetime.now(timezone.utc).isoformat()
+                        update_position(market_id, **fields)
+                        if need_note:
+                            await tg_send(
+                                f"⏳ <b>MENANG — menunggu claim</b>\n"
+                                f"{pos['question'][:80]}\n"
+                                f"Slot posisi sudah dibebaskan, bot coba claim lagi otomatis.\n"
+                                f"Penyebab: {str(res.get('error'))[:200]}"
+                            )
             else:
                 close_position(market_id, realized_pnl=-pos["cost_usd"],
                                exit_price=0.0, reason="KALAH")
@@ -1156,6 +1274,9 @@ async def manage_open_positions() -> int:
                     f"-${pos['cost_usd']:.2f}"
                 )
             continue
+
+        if pos.get("status") == "PENDING_CLAIM":
+            continue  # belum ter-resolve lagi / tunggu siklus berikut
 
         bid = get_best_bid(token_id)
         if bid is not None and bid >= EXIT_UPPER:
@@ -1286,6 +1407,7 @@ async def run_cycle():
         if not can_open_new_position():
             break
 
+        await asyncio.sleep(2)  # delay agar Google News tidak 429
         analysis = await analyze_market(m)
         sig      = analysis.get("signal", "SKIP")
         conf     = int(analysis.get("confidence", 0) or 0)
@@ -1339,6 +1461,9 @@ async def main():
         raise RuntimeError("TELEGRAM_BOT_TOKEN belum diisi")
     if not GROQ_API_KEY or GROQ_API_KEY.startswith("ISI_"):
         raise RuntimeError("GROQ_API_KEY belum diisi")
+
+    if not (POLYMARKET_RELAYER_API_KEY and POLYMARKET_RELAYER_API_KEY_ADDRESS):
+        logger.warning("⚠️ POLYMARKET_RELAYER_API_KEY belum diisi — auto-claim akan gagal")
 
     state = load_state()
     state["active"] = False
