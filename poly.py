@@ -41,6 +41,7 @@ FALLBACK_2_HOURS = 20
 TOP_MARKETS      = 10
 
 SPORTS_KEYWORDS = [
+    # Olahraga tradisional
     "win", "beat", "defeat", "match", "game", "final", "championship",
     "league", "cup", "tournament", "nfl", "nba", "nhl", "mlb", "mls",
     "soccer", "football", "basketball", "baseball", "hockey", "tennis",
@@ -49,7 +50,17 @@ SPORTS_KEYWORDS = [
     "world cup", "playoffs", "superbowl", "super bowl", "nascar",
     "score", "goal", "point", "quarter", "half", "overtime",
     "leading", "halftime", "both teams", "first half", "second half",
+    "fastest lap", "practice", "qualifying", "podium", "pole position",
+    # Esports / Gaming
+    "esports", "esport", "valorant", "dota", "dota 2", "cs2", "csgo",
+    "counter-strike", "league of legends", "lol", "overwatch", "fortnite",
+    "pubg", "mobile legends", "mlbb", "apex legends", "rainbow six",
+    "rocket league", "starcraft", "hearthstone", "clash royale",
+    "tournament", "major", "grand final", "map", "round", "kill",
 ]
+
+# ── Max spread ─────────────────────────────────────────────────
+MAX_SPREAD_PCT = 5.0  # skip kalau spread > 5%
 
 MIN_ODDS = 0.40
 MAX_ODDS = 0.60
@@ -60,7 +71,7 @@ EXIT_UPPER          = 0.99
 SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
-MAX_OPEN_POSITIONS     = 3
+MAX_OPEN_POSITIONS     = 5
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 3
 ALERT_BALANCE_DROP_PCT = 20
@@ -779,7 +790,8 @@ def _parse_market(m: dict) -> dict | None:
     try:
         raw    = m.get("outcomePrices", "[]")
         prices = json.loads(raw) if isinstance(raw, str) else raw
-        if not prices or len(prices) < 2:
+        # Hanya ambil market binary (2 pilihan YES/NO) — hapus yang 3+ pilihan
+        if not prices or len(prices) != 2:
             return None
         yes = float(prices[0])
         if not (MIN_ODDS <= yes <= MAX_ODDS):
@@ -907,6 +919,19 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         if amount_usd < 1.0:
             return {"success": False, "error": "Minimal $1 per order"}
 
+        # Cek spread dulu sebelum beli
+        import httpx as _h
+        r = _h.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "BUY"}, timeout=10)
+        ask = float(r.json().get("price", 0)) if r.status_code == 200 else 0
+        r2  = _h.get(f"{CLOB_API}/price", params={"token_id": token_id, "side": "SELL"}, timeout=10)
+        bid = float(r2.json().get("price", 0)) if r2.status_code == 200 else 0
+
+        if ask > 0 and bid > 0:
+            spread_pct = (ask - bid) / ask * 100
+            if spread_pct > MAX_SPREAD_PCT:
+                logger.info(f"⏭️ Skip spread terlalu besar: {spread_pct:.1f}% > {MAX_SPREAD_PCT}%")
+                return {"success": False, "error": f"Spread {spread_pct:.1f}% terlalu besar"}
+
         client = _get_poly_client()
         result = client.place_market_order(
             token_id=token_id,
@@ -916,14 +941,22 @@ def buy_outcome(token_id: str, amount_usd: float) -> dict:
         )
         logger.info(f"📋 buy response: {result}")
 
+        # Cek making_amount > 0 — kalau 0 artinya tidak ada likuiditas
         if result.ok:
+            if hasattr(result, "making_amount") and float(result.making_amount) == 0:
+                logger.warning(f"⚠️ Order delayed/no fill — making_amount=0, skip catat posisi")
+                return {"success": False, "error": "Order tidak terisi (no fill)"}
             tx = result.transactions_hashes[0] if result.transactions_hashes else ""
             return {"success": True, "order": result, "tx_hash": tx}
         return {"success": False, "error": str(result)}
 
     except Exception as e:
-        logger.error(f"❌ buy_outcome error: {e}")
-        return {"success": False, "error": str(e)}
+        err = str(e)
+        if "liquidity" in err.lower():
+            logger.info(f"⏭️ Skip no liquidity: {token_id[:20]}...")
+        else:
+            logger.error(f"❌ buy_outcome error: {e}")
+        return {"success": False, "error": err}
 
 
 def sell_outcome(token_id: str, shares: float) -> dict:
@@ -931,14 +964,15 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": True, "dry_run": True,
                 "order": {"note": f"DEMO: jual {shares:.4f} share"}}
     try:
-        if shares < 1.0:
-            return {"success": False, "error": "Share terlalu kecil"}
+        if shares <= 0:
+            return {"success": False, "error": "Shares tidak valid"}
 
         client = _get_poly_client()
+        # SDK baru: pakai shares parameter (jumlah kontrak yang dipegang)
         result = client.place_market_order(
             token_id=token_id,
             side="SELL",
-            shares=round(shares, 4),
+            shares=round(shares, 2),
             order_type="FOK",
         )
         logger.info(f"📋 sell response: {result}")
@@ -1010,10 +1044,11 @@ BERITA (bisa kosong):
 
 CARA ANALISIS:
 1. Gunakan harga pasar sebagai sinyal utama — harga YES>55% artinya pasar prediksi YES lebih mungkin
-2. Gunakan pengetahuan kamu tentang tim, liga, dan statistik historis
-3. Berita hanya bonus — kalau tidak ada berita, tetap beri prediksi dari harga dan pengetahuan
-4. Pilih YES atau NO yang lebih mungkin terjadi, beri confidence 60-90
-5. Hanya SKIP kalau benar-benar tidak bisa diprediksi sama sekali
+2. Gunakan pengetahuan kamu tentang tim, liga, pemain, dan statistik historis
+3. Berita hanya bonus — kalau tidak ada berita, tetap beri prediksi dari harga pasar
+4. Kalau tidak kenal timnya, andalkan harga pasar — YES 55%+ → BUY_YES, NO 55%+ → BUY_NO
+5. Hanya SKIP kalau harga benar-benar 50/50 dan tidak ada informasi apapun
+6. JANGAN pernah SKIP hanya karena tidak kenal nama tim
 
 Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick:
 {{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 8 kata"}}"""
