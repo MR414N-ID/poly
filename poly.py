@@ -65,13 +65,13 @@ MAX_SPREAD_PCT = 5.0  # skip kalau spread > 5%
 MIN_ODDS = 0.40
 MAX_ODDS = 0.60
 
-MIN_CONFIDENCE      = 60
+MIN_CONFIDENCE      = 65
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
 SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
-MAX_OPEN_POSITIONS     = 5
+MAX_OPEN_POSITIONS     = 7
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 3
 ALERT_BALANCE_DROP_PCT = 20
@@ -793,6 +793,13 @@ def _parse_market(m: dict) -> dict | None:
         # Hanya ambil market binary (2 pilihan YES/NO) — hapus yang 3+ pilihan
         if not prices or len(prices) != 2:
             return None
+
+        # Hapus market yang mengandung draw/seri
+        question = m.get("question", "").lower()
+        DRAW_KEYWORDS = ["draw", "seri", "imbang", "tie", "drawn"]
+        if any(kw in question for kw in DRAW_KEYWORDS):
+            return None
+
         yes = float(prices[0])
         if not (MIN_ODDS <= yes <= MAX_ODDS):
             return None
@@ -983,8 +990,12 @@ def sell_outcome(token_id: str, shares: float) -> dict:
         return {"success": False, "error": str(result)}
 
     except Exception as e:
-        logger.error(f"❌ sell_outcome error: {e}")
-        return {"success": False, "error": str(e)}
+        err = str(e)
+        if "liquidity" in err.lower():
+            logger.info(f"⏭️ Sell skip — no liquidity, tunggu market resolve")
+        else:
+            logger.error(f"❌ sell_outcome error: {e}")
+        return {"success": False, "error": err}
 
 
 def redeem_position(market_id: str, condition_id: str) -> dict:
@@ -1043,12 +1054,13 @@ BERITA (bisa kosong):
 {news}
 
 CARA ANALISIS:
-1. Gunakan harga pasar sebagai sinyal utama — harga YES>55% artinya pasar prediksi YES lebih mungkin
-2. Gunakan pengetahuan kamu tentang tim, liga, pemain, dan statistik historis
-3. Berita hanya bonus — kalau tidak ada berita, tetap beri prediksi dari harga pasar
-4. Kalau tidak kenal timnya, andalkan harga pasar — YES 55%+ → BUY_YES, NO 55%+ → BUY_NO
-5. Hanya SKIP kalau harga benar-benar 50/50 dan tidak ada informasi apapun
-6. JANGAN pernah SKIP hanya karena tidak kenal nama tim
+1. Analisis KONTEKS pertanyaan — siapa yang lebih mungkin menang/terjadi berdasarkan pengetahuan tim, pemain, liga
+2. Harga pasar adalah PETUNJUK saja, bukan penentu utama — cari value bet (beli yang underpriced)
+3. Contoh: Cruz Azul tim kuat main kandang → pilih YES meski YES hanya 44¢
+4. Contoh: Pemain biasa diminta cetak 3 gol → pilih NO meski NO sudah 80¢
+5. Berita hanya bonus — kalau tidak ada berita, analisis dari nama tim/pemain/konteks
+6. Pilih outcome yang PALING MUNGKIN terjadi, bukan yang harganya paling tinggi
+7. SKIP hanya kalau benar-benar tidak bisa diprediksi (50/50 murni tanpa info apapun)
 
 Balas HANYA satu baris JSON valid, tanpa teks lain, tanpa backtick:
 {{"signal":"BUY_YES","confidence":75,"recommended_outcome":"YES","reasoning":"alasan max 8 kata"}}"""
