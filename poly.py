@@ -41,22 +41,49 @@ FALLBACK_2_HOURS = 20
 TOP_MARKETS      = 10
 
 SPORTS_KEYWORDS = [
-    # Olahraga tradisional
-    "win", "beat", "defeat", "match", "game", "final", "championship",
-    "league", "cup", "tournament", "nfl", "nba", "nhl", "mlb", "mls",
-    "soccer", "football", "basketball", "baseball", "hockey", "tennis",
-    "ufc", "mma", "boxing", "golf", "f1", "formula", "race", "grand prix",
-    "premier league", "la liga", "serie a", "bundesliga", "champions league",
-    "world cup", "playoffs", "superbowl", "super bowl", "nascar",
-    "score", "goal", "point", "quarter", "half", "overtime",
-    "leading", "halftime", "both teams", "first half", "second half",
-    "fastest lap", "practice", "qualifying", "podium", "pole position",
-    # Esports / Gaming
-    "esports", "esport", "valorant", "dota", "dota 2", "cs2", "csgo",
-    "counter-strike", "league of legends", "lol", "overwatch", "fortnite",
-    "pubg", "mobile legends", "mlbb", "apex legends", "rainbow six",
-    "rocket league", "starcraft", "hearthstone", "clash royale",
-    "tournament", "major", "grand final", "map", "round", "kill",
+    # Olahraga tanpa draw (aman)
+    "nfl", "nba", "nhl", "mlb",
+    "basketball", "baseball", "hockey", "tennis",
+    "ufc", "mma", "boxing",
+    "playoffs", "superbowl", "super bowl",
+    "championship", "final",
+    # Esports / Gaming — mobile
+    "mobile legends", "mlbb", "pubg mobile", "free fire", "freefire",
+    "clash royale", "clash of clans", "honor of kings", "arena of valor",
+    # Esports / Gaming — PC
+    "valorant", "dota 2", "dota2", "cs2", "csgo", "counter-strike",
+    "league of legends", "lol", "overwatch", "apex legends",
+    "rainbow six", "rocket league", "starcraft", "fortnite", "pubg pc",
+    # Esports / Gaming — console
+    "nba 2k", "madden", "efootball",
+    # Esports general
+    "esports", "esport", "gaming tournament",
+    "grand final", "major tournament", "lan event",
+]
+
+# ── Keyword yang DILARANG di question ─────────────────────────
+SKIP_MARKET_KEYWORDS = [
+    # Sepak bola
+    "soccer", "football", "premier league", "la liga", "serie a",
+    "bundesliga", "champions league", "world cup", "mls", "ligue 1",
+    "goal", "goals", "offsides",
+    # F1 / Motorsport
+    "f1", "formula 1", "formula one", "fastest lap", "grand prix",
+    "qualifying", "pole position", "podium", "nascar", "race",
+    # Golf
+    "golf", "pga", "masters",
+    # Sub-market / pilihan ganda
+    "map 1", "map 2", "map 3", "map 4", "map 5",
+    "first half", "second half", "halftime", "1h ", "2h ",
+    "first blood", "most kills", "first tower", "first baron",
+    "first dragon", "ace", "pentakill",
+    "both teams to score", "both teams",
+    "leading at half", "leading at quarter",
+    "score first", "first goal",
+    "over/under", "o/u", "total corners", "total rounds",
+    "draw", "tie", "seri", "imbang", "drawn",
+    "win map", "win round", "win half",
+    "practice", "qualify",
 ]
 
 # ── Max spread ─────────────────────────────────────────────────
@@ -65,13 +92,13 @@ MAX_SPREAD_PCT = 5.0  # skip kalau spread > 5%
 MIN_ODDS = 0.40
 MAX_ODDS = 0.60
 
-MIN_CONFIDENCE      = 65
+MIN_CONFIDENCE      = 60
 MAX_BET_PER_MARKET  = 1.0
 EXIT_UPPER          = 0.99
 SCAN_INTERVAL_MENIT = 5
 MIN_USDC_BALANCE    = 5.0
 
-MAX_OPEN_POSITIONS     = 7
+MAX_OPEN_POSITIONS     = 3
 ENABLE_SELL            = True
 MAX_DAILY_LOSSES       = 3
 ALERT_BALANCE_DROP_PCT = 20
@@ -794,10 +821,9 @@ def _parse_market(m: dict) -> dict | None:
         if not prices or len(prices) != 2:
             return None
 
-        # Hapus market yang mengandung draw/seri
+        # Hapus market yang mengandung keyword terlarang
         question = m.get("question", "").lower()
-        DRAW_KEYWORDS = ["draw", "seri", "imbang", "tie", "drawn"]
-        if any(kw in question for kw in DRAW_KEYWORDS):
+        if any(kw in question for kw in SKIP_MARKET_KEYWORDS):
             return None
 
         yes = float(prices[0])
