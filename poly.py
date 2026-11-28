@@ -1028,12 +1028,23 @@ def redeem_position(market_id: str, condition_id: str) -> dict:
     if is_demo():
         return {"success": True, "dry_run": True, "note": "DEMO: claim disimulasikan"}
     try:
-        from polymarket.models import ConditionId
-        client = _get_poly_client()
-        result = client.redeem_positions(condition_id=ConditionId(condition_id))
-        logger.info(f"📋 redeem response: {result}")
-        tx = result.transactions_hashes[0] if hasattr(result, "transactions_hashes") and result.transactions_hashes else ""
-        return {"success": True, "resp": result, "tx_hash": tx}
+        # Pakai py_clob_client lama untuk redeem — tidak butuh Builder Key
+        from py_clob_client.client import ClobClient
+        from py_clob_client.constants import POLYGON
+        client = ClobClient(
+            host=CLOB_API,
+            key=POLYMARKET_WALLET_KEY,
+            chain_id=POLYGON,
+            signature_type=1,
+            funder=POLYMARKET_FUNDER_ADDRESS or None,
+        )
+        client.set_api_creds(client.create_or_derive_api_creds())
+        if hasattr(client, "redeem"):
+            resp    = client.redeem(condition_id=condition_id)
+            tx_hash = resp.get("transactionHash", "") if isinstance(resp, dict) else ""
+            logger.info(f"📋 redeem response: {resp}")
+            return {"success": True, "resp": resp, "tx_hash": tx_hash}
+        return {"success": False, "error": "redeem tidak tersedia"}
     except Exception as e:
         logger.error(f"❌ redeem error: {e}")
         return {"success": False, "error": str(e)}
@@ -1353,22 +1364,29 @@ async def run_cycle():
         if not token:
             continue
 
+        # Cek harga aktual dari CLOB sebelum beli
+        ask = get_best_ask(token)
+        if ask is None:
+            logger.info(f"⏭️ Skip — gagal ambil harga ask")
+            continue
+
+        # Validasi harga aktual dalam range 40-60%
+        if not (MIN_ODDS <= ask <= MAX_ODDS):
+            logger.info(f"⏭️ Skip — harga aktual {ask:.2f} di luar range {MIN_ODDS}-{MAX_ODDS}")
+            continue
+
         if demo:
             bal = load_virtual_balance()
             if bal < MAX_BET_PER_MARKET:
                 await tg_send(f"⚠️ Saldo DEMO habis (${bal:.2f}). Reset via tombol.")
                 return
             amount = MAX_BET_PER_MARKET
-            ask    = m["yes_price"] if analysis["recommended_outcome"] == "YES" else m["no_price"]
         else:
             bal = get_usdc_balance()
             if bal < MAX_BET_PER_MARKET:
                 await tg_send(f"⚠️ pUSD tidak cukup: ${bal:.2f}")
                 return
             amount = MAX_BET_PER_MARKET
-            ask    = get_best_ask(token)
-            if ask is None:
-                continue
 
         res = buy_outcome(token, amount)
         if res.get("success"):
